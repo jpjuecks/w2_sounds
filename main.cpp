@@ -212,11 +212,11 @@ static constexpr size_t NUM_SOUNDS = sizeof(samples) / sizeof(samples[0]);
 
 // Locations/metadata of palette data within RESOURCE.BIN
 static constexpr size_t DEFAULT_PAL_OFFSET{ 636 }, MENU_PAL_OFFSET{ 4033 };
-static constexpr size_t ENEMY_PAL_COLORS{ 80 }, ENEMY_PAL_START{ 64 },
+static constexpr size_t NUM_ENEMY_PALS{ 3 }, ENEMY_PAL_COLORS{ 80 }, ENEMY_PAL_START{ 64 },
 	ENEMY_PAL_END{ ENEMY_PAL_START + ENEMY_PAL_COLORS };
 
 // Locations/metadata of font data withing RESOURCE.BIN
-static constexpr size_t FONT_DATA_OFFSET{ 1884 }, FONT_GLYPH_SIZE{ 8 },
+static constexpr size_t FONT_DATA_OFFSET{ 2124 }, FONT_GLYPH_SIZE{ 8 },
 FONT_NUM_GLYPHS{ 224 }, FONT_ASCII_START{ 32 },
 FONT_ASCII_END{ FONT_ASCII_START + FONT_NUM_GLYPHS },
 FONT_GLYPH_WIDTH{ FONT_GLYPH_SIZE },		// Width of actual glpyh image
@@ -234,8 +234,8 @@ class ResourceBin {
 	// Audio samples
 	std::vector<SamplePtr> wavs_;
 
-	// Gameplay palettes (256 colors each, although palettes 1 and 2 differ only in the 80 colors in the range 64..143)
-	std::array<Palette, 3> palettes_;
+	// Gameplay palettes (256 colors each, although palettes 1 - 3 differ only in the 80 colors in the range 64..143)
+	std::array<Palette, NUM_ENEMY_PALS + 1> palettes_;
 
 	// Menu palette
 	Palette menu_pal_;
@@ -248,8 +248,9 @@ public:
 		DEFAULT = 0,
 		RED_ENEMIES = 1,
 		BLUE_ENEMIES = 2,
+		DIM_ENEMIES = 3,
 
-		NUM_PALETTES = 3
+		NUM_PALETTES = 4
 	};
 
 	explicit ResourceBin(const char *pathToResourceBin = "RESOURCE.BIN") {
@@ -355,10 +356,6 @@ public:
 		return NUM_SOUNDS;
 	}
 
-	ALLEGRO_BITMAP *font_bmp() const {
-		return font_bmp_.get();
-	}
-
 	ALLEGRO_FONT *font() const {
 		return font_.get();
 	}
@@ -372,10 +369,10 @@ static constexpr size_t NUM_SPRITES = SPRITES_COLS * SPRITES_ROWS;
 
 class SpritesBin {
 	// Bitmaps containing all the data from SPRITES.BIN in the 3 available palettes
-	std::array<BitmapPtr, 3> sprite_maps_;
+	std::array<BitmapPtr, ResourceBin::NUM_PALETTES> sprite_maps_;
 
 	// Sub-bitmaps for each sprite (for each palette)
-	std::array<std::array<BitmapPtr, NUM_SPRITES>, 3> sprites_;
+	std::array<std::array<BitmapPtr, NUM_SPRITES>, ResourceBin::NUM_PALETTES> sprites_;
 public:
 	// Must have loaded palette data from RESOURCE.BIN first!
 	SpritesBin(const ResourceBin& rsrc, const char *pathToSpritesBin = "SPRITES.BIN") {
@@ -384,7 +381,7 @@ public:
 			throw std::exception("Unable to read data from SPRITES.BIN");
 		}
 
-		for (size_t i = 0; i < 3; ++i) {
+		for (size_t i = 0; i < sprite_maps_.size(); ++i) {
 			sprite_maps_[i] = bload_convert(raw, rsrc.palette(i));
 
 			for (size_t n = 0; n < NUM_SPRITES; ++n) {
@@ -438,6 +435,14 @@ public:
 		frame_ttl_ = ttl;
 	}
 
+	void set_dx(float dx) { dx_ = dx; }
+	void set_dy(float dy) { dy_ = dy; }
+
+	float x() const { return x_; }
+	float y() const { return y_; }
+	void set_x(float x) { x_ = x; }
+	void set_y(float y) { y_ = y; }
+
 	void update() {
 		x_ += dx_;
 		y_ += dy_;
@@ -455,12 +460,29 @@ public:
 
 };
 
-static constexpr int DWIDTH = 640, DHEIGHT = 480;
+static constexpr int DWIDTH = 640, DHEIGHT = 400;
 
 void allegro_die(const char *msg) {
 	std::cout << msg << " (errno=" << al_get_errno() << ")\n";
 	exit(1);
 }
+
+class RenderBuffer {
+	BitmapPtr fb_;
+public:
+	RenderBuffer() : fb_(al_create_bitmap(VGA13_WIDTH, VGA13_HEIGHT)) {
+		if (!fb_) { throw std::exception("Unable to create RenderBuffer bitmap"); }
+		al_set_target_bitmap(fb_.get());
+	}
+
+	void flip(ALLEGRO_DISPLAY *display) {
+		al_set_target_backbuffer(display);
+		al_draw_scaled_bitmap(fb_.get(), 0, 0, VGA13_WIDTH, VGA13_HEIGHT, 0, 0,
+			al_get_display_width(display), al_get_display_height(display), 0);
+		al_flip_display();
+		al_set_target_bitmap(fb_.get());
+	}
+};
 
 int main(int argc, char **argv) {
 	startup();
@@ -474,6 +496,7 @@ int main(int argc, char **argv) {
 	if (!timer) { allegro_die("Unable to create timer"); }
 	al_register_event_source(events.get(), al_get_timer_event_source(timer.get()));
 	
+	//al_set_new_display_flags(ALLEGRO_FULLSCREEN);
 	DisplayPtr dptr{ al_create_display(DWIDTH, DHEIGHT) };
 	if (!dptr) { allegro_die("Unable to create display"); }
 	al_register_event_source(events.get(), al_get_display_event_source(dptr.get()));
@@ -488,38 +511,111 @@ int main(int argc, char **argv) {
 	BitmapPtr bgrd{ bload_convert(raw, rsrc.menu_palette()) };
 	if (!bgrd) { allegro_die("Unable to BLOAD TITLE.BIN"); }
 
-	SpriteObj crab{ sprites.sprite(1, 0), DWIDTH / 2.0f, DHEIGHT / 2.0f };
+	SpriteObj crab{ sprites.sprite(1, 0), VGA13_WIDTH / 2.0f, VGA13_HEIGHT / 2.0f };
 	crab.add_frame(sprites.sprite(0));
 	crab.add_frame(sprites.sprite(1));
 	crab.add_frame(sprites.sprite(2));
 	crab.animate(10);
 
+	RenderBuffer frame_buff;	// All rendering goes here...
 	al_start_timer(timer.get());
 	bool done = false;
 	bool render = true;
+	ResourceBin::PALETTE pal = ResourceBin::DEFAULT;
 	while (!done) {
-		// Drain event queue
 		ALLEGRO_EVENT evt;
-		while (al_get_next_event(events.get(), &evt)) {
-			switch (evt.type) {
-			case ALLEGRO_EVENT_DISPLAY_CLOSE:
+		al_wait_for_event(events.get(), &evt);
+		
+		switch (evt.type) {
+		case ALLEGRO_EVENT_DISPLAY_CLOSE:
+			done = true;
+			break;
+		case ALLEGRO_EVENT_KEY_DOWN:
+			switch (evt.keyboard.keycode) {
+			case ALLEGRO_KEY_LEFT:
+				crab.set_dx(-1.0f);
+				break;
+			case ALLEGRO_KEY_RIGHT:
+				crab.set_dx(1.0f);
+				break;
+			case ALLEGRO_KEY_UP:
+				crab.set_dy(-1.0f);
+				break;
+			case ALLEGRO_KEY_DOWN:
+				crab.set_dy(1.0f);
+				break;
+			case ALLEGRO_KEY_ESCAPE:
 				done = true;
 				break;
-			case ALLEGRO_EVENT_TIMER:
-				if (evt.timer.source == timer.get()) {
-					crab.update();
-					render = true;
-				}
+			}
+			break;
+		case ALLEGRO_EVENT_KEY_UP:
+			switch (evt.keyboard.keycode) {
+			case ALLEGRO_KEY_LEFT:
+			case ALLEGRO_KEY_RIGHT:
+				crab.set_dx(0);
+				break;
+			case ALLEGRO_KEY_UP:
+			case ALLEGRO_KEY_DOWN:
+				crab.set_dy(0);
 				break;
 			}
+			break;
+		case ALLEGRO_EVENT_KEY_CHAR:
+			switch (evt.keyboard.unichar) {
+			case '0':
+				pal = ResourceBin::DEFAULT;
+				render = true;
+				break;
+			case '1':
+				pal = ResourceBin::RED_ENEMIES;
+				render = true;
+				break;
+			case '2':
+				pal = ResourceBin::BLUE_ENEMIES;
+				render = true;
+				break;
+			case '3':
+				pal = ResourceBin::DIM_ENEMIES;
+				render = true;
+				break;
+			case 'a':	// 0
+			case 'b':	// 1
+			case 'c':	// 2
+			case 'd':	// 3
+			case 'e':	// 4
+			case 'f':	// 5
+			case 'g':	// 6
+			case 'h':	// 7
+			case 'i':	// 8
+			case 'j':	// 9
+			case 'k':	// 10
+			case 'l':	// 11
+			case 'm':	// 12
+			case 'n':	// 13
+			case 'o':	// 14
+			case 'p':	// 15
+			case 'q':	// 16
+			case 'r':	// 17
+			case 's':	// 18
+				al_play_sample(rsrc.sample(evt.keyboard.unichar - 'a'), 1.0f, ALLEGRO_AUDIO_PAN_NONE, 1.0f, ALLEGRO_PLAYMODE_ONCE, nullptr);
+				break;
+			}
+			break;
+		case ALLEGRO_EVENT_TIMER:
+			if (evt.timer.source == timer.get()) {
+				crab.update();
+				render = true;
+			}
+			break;
 		}
 
-		if (render) {
-			al_draw_scaled_bitmap(bgrd.get(), 0, 0, 320, 200, 0, 0, DWIDTH, DHEIGHT, 0);
-			al_draw_scaled_bitmap(rsrc.font_bmp(), 0, 0, 160, 120, 0, 0, DWIDTH, DHEIGHT, 0);
-			//al_draw_textf(rsrc.font(), al_map_rgb(255, 255, 255), DWIDTH / 2, 0, ALLEGRO_ALIGN_CENTER, "HELLO, WORLD!");
+		if (render && al_is_event_queue_empty(events.get())) {
+			al_draw_bitmap(bgrd.get(), 0, 0, 0);
+			al_draw_bitmap(sprites.sprite_map(pal), 0, 0, 0);
+			al_draw_textf(rsrc.font(), al_map_rgb(255, 255, 255), VGA13_WIDTH / 2.0f, 0, ALLEGRO_ALIGN_CENTER, "POTION BONUS");
 			crab.render();
-			al_flip_display();
+			frame_buff.flip(dptr.get());
 			render = false;
 		}
 	}
