@@ -69,7 +69,7 @@ static const struct sample_loc_t {
 
 static constexpr size_t NUM_SOUNDS = sizeof(samples) / sizeof(samples[0]);
 
-static constexpr size_t DEFAULT_PAL_OFFSET{ 636 };
+static constexpr size_t DEFAULT_PAL_OFFSET{ 636 }, MENU_PAL_OFFSET{ 4033 };
 
 // Template specialization: have ALLEGRO_XXX ptr objectes "deleted" with al_destroy_xxx
 #define ALLEGRO_PTR_DELETER(struct_t, deleter_proc) \
@@ -79,6 +79,7 @@ static constexpr size_t DEFAULT_PAL_OFFSET{ 636 };
 		{ \
 		public: \
 			void operator()(struct_t *ptr) { \
+				/*std::cerr << "Deleting " #struct_t " @ " << (void *)ptr << std::endl;*/ \
 				deleter_proc(ptr); \
 			} \
 		}; \
@@ -87,25 +88,82 @@ static constexpr size_t DEFAULT_PAL_OFFSET{ 636 };
 ALLEGRO_PTR_DELETER(ALLEGRO_DISPLAY, al_destroy_display)
 ALLEGRO_PTR_DELETER(ALLEGRO_BITMAP, al_destroy_bitmap)
 ALLEGRO_PTR_DELETER(ALLEGRO_SAMPLE, al_destroy_sample)
+ALLEGRO_PTR_DELETER(ALLEGRO_FILE, al_fclose)
+ALLEGRO_PTR_DELETER(ALLEGRO_FS_ENTRY, al_destroy_fs_entry)
 
-// Use a vector of char for all file I/O (because stupid iostreams API)
-using Buffer = std::vector<char>;
+using Buffer = std::vector<uint8_t>;
+using Palette = std::array<ALLEGRO_COLOR, 256>;
 
 // Use unique_ptr to manage the lifetime of ALLEGRO_SAMPLE objects
 using DisplayPtr = std::unique_ptr<ALLEGRO_DISPLAY>;
 using BitmapPtr = std::unique_ptr<ALLEGRO_BITMAP>;
 using SamplePtr = std::unique_ptr<ALLEGRO_SAMPLE>;
+using FilePtr = std::unique_ptr<ALLEGRO_FILE>;
+using FsPtr = std::unique_ptr<ALLEGRO_FS_ENTRY>;
 
 // Utility function to open and read the entire [binary] contents
 // of a given file into a vector<char> (resizing as necessary)
 bool slurp_file(const char *filename, Buffer& dest) {
-	std::ifstream file{ filename, std::ios::binary };
-	if (!file.seekg(0, std::ios::end)) { return false; }
-	auto file_size = file.tellg();
-	dest.resize(file_size);
-	if (!file.seekg(0, std::ios::beg)) { return false; }
-	file.read(&dest[0], dest.size());
-	return file.good();	// Have not read PAST EOF, so should still be good...
+	FsPtr ent{ al_create_fs_entry(filename) };
+	if (!ent) {
+		return false;
+	}
+	
+	FilePtr fp{ al_fopen(filename, "rb") };
+	if (!fp) {
+		return false;
+	}
+	
+	dest.resize(al_get_fs_entry_size(ent.get()));
+	if (al_fread(fp.get(), &dest[0], dest.size()) < dest.size()) {
+		return false;
+	}
+	
+	return true;
+}
+
+// Like slurp_file, but specifically for loading QuickBASIC
+// VGA mode 13h BSAVEd image files.
+bool bload_file(const char *filename, Buffer& dest) {
+	FilePtr fp{ al_fopen(filename, "rb") };
+	if (!fp) { return false; }
+
+	uint8_t bmagic = al_fgetc(fp.get());
+	if (bmagic != 0xFD) { return false; }
+
+	if (!al_fseek(fp.get(), 4, ALLEGRO_SEEK_CUR)) { return false; }
+
+	uint16_t bsize = al_fread16le(fp.get());
+	
+	dest.resize(bsize);
+	if (al_fread(fp.get(), &dest[0], bsize) < bsize) { return false; }
+
+	return true;
+}
+
+// Convert the raw data of a BSAVEd VGA mode 13h image to an ALLEGRO_BITMAP
+// using a given palette
+BitmapPtr bload_convert(const Buffer& data, const Palette& pal) {
+	BitmapPtr bmp{ al_create_bitmap(320, 200) };
+
+	if (!al_lock_bitmap(bmp.get(), ALLEGRO_PIXEL_FORMAT_ANY, ALLEGRO_LOCK_WRITEONLY)) {
+		throw std::exception("Unable to lock ALLEGRO_BITMAP for writing");
+	}
+
+	auto original = al_get_target_bitmap();
+	al_set_target_bitmap(bmp.get());
+	for (int y = 0; y < 200; ++y) {
+		for (int x = 0; x < 320; ++x) {
+			size_t offset = (320 * y) + x;
+			if (offset < data.size()) {
+				al_put_pixel(x, y, pal[data[offset]]);
+			}
+		}
+	}
+	al_unlock_bitmap(bmp.get());
+	al_set_target_bitmap(original);
+
+	return bmp;
 }
 
 // Abstraction of all resources packed into RESOURCE.BIN
@@ -116,8 +174,11 @@ class ResourceBin {
 	// Audio samples
 	std::vector<SamplePtr> wavs_;
 
-	// Palettes (256 colors each, although palettes 1 and 2 differ only in the 80 colors in the range 64..143)
-	std::array<std::array<ALLEGRO_COLOR, 256>, 3> palettes_;
+	// Gameplay palettes (256 colors each, although palettes 1 and 2 differ only in the 80 colors in the range 64..143)
+	std::array<Palette, 3> palettes_;
+
+	// Menu palette
+	Palette menu_pal_;
 public:
 	explicit ResourceBin(const char *pathToResourceBin = "RESOURCE.BIN") {
 		if (!slurp_file(pathToResourceBin, data_)) {
@@ -133,31 +194,46 @@ public:
 		// Create default palette colors
 		size_t offset = DEFAULT_PAL_OFFSET;
 		for (size_t i = 0; i < 256; ++i) {
-			const char *cp = &data_[offset];
-			unsigned char r = static_cast<unsigned char>(cp[0]) * 4;	// Original VGA palette entries are 0-63; we need 0-255
-			unsigned char g = static_cast<unsigned char>(cp[1]) * 4;
-			unsigned char b = static_cast<unsigned char>(cp[2]) * 4;
+			const uint8_t *cp = &data_[offset];
+			uint8_t a = (i == 0) ? 0 : 255;		// Color 0 is the transparent color for sprites
+			uint8_t r = cp[0] * 4;				// Original VGA palette entries are 0-63; we need 0-255
+			uint8_t g = cp[1] * 4;
+			uint8_t b = cp[2] * 4;
+			palettes_[0][i] = al_map_rgba(r, g, b, a);
 			offset += 3;
-			palettes_[0][i] = al_map_rgba(r, g, b, (i == 0) ? 0 : 255);	// Color 0 is transparent!
 		}
 
 		// Create enemy palettes
 		for (size_t p = 1; p < 3; ++p) {
 			std::copy(palettes_[0].begin(), palettes_[0].begin() + 64, palettes_[p].begin());			// 0..63 copied
 			for (size_t i = 64; i < 144; ++i) {
-				const char *cp = &data_[offset];
-				unsigned char r = static_cast<unsigned char>(cp[0]) * 4;
-				unsigned char g = static_cast<unsigned char>(cp[1]) * 4;
-				unsigned char b = static_cast<unsigned char>(cp[2]) * 4;
+				const uint8_t *cp = &data_[offset];
+				uint8_t r = cp[0] * 4;
+				uint8_t g = cp[1] * 4;
+				uint8_t b = cp[2] * 4;
 				offset += 3;
 				palettes_[p][i] = al_map_rgba(r, g, b, 255);
 			}
 			std::copy(palettes_[0].begin() + 144, palettes_[0].end(), palettes_[p].begin() + 144);		// 144..255 copied
 		}
+
+		// Create menu palette (at a different offset in the file)
+		offset = MENU_PAL_OFFSET;
+		for (size_t i = 0; i < 256; ++i) {
+			const uint8_t *cp = &data_[offset];
+			uint8_t a = (i == 0) ? 0 : 255;		// Color 0 is the transparent color for sprites
+			uint8_t r = cp[0] * 4;				// Original VGA palette entries are 0-63; we need 0-255
+			uint8_t g = cp[1] * 4;
+			uint8_t b = cp[2] * 4;
+			menu_pal_[i] = al_map_rgba(r, g, b, a);
+			offset += 3;
+		}
 	}
 
-	const ALLEGRO_COLOR& color(size_t index, size_t palette=0) const {
-		return palettes_.at(palette).at(index);
+	const Palette& menu_palette() const { return menu_pal_; }
+
+	const Palette& palette(size_t index) const {
+		return palettes_.at(index);
 	}
 
 	ALLEGRO_SAMPLE *sample(size_t index) const {
@@ -176,29 +252,12 @@ public:
 	// Must have loaded palette data from RESOURCE.BIN first!
 	SpritesBin(const ResourceBin& rsrc, const char *pathToSpritesBin = "SPRITES.BIN") {
 		Buffer raw;
-		if (!slurp_file(pathToSpritesBin, raw)) {
+		if (!bload_file(pathToSpritesBin, raw)) {
 			throw std::exception("Unable to read data from SPRITES.BIN");
 		}
 
 		for (size_t i = 0; i < 3; ++i) {
-			sprite_maps_[i].reset(al_create_bitmap(320, 200));
-			if (!sprite_maps_[i].get()) {
-				throw std::exception("Unable to create bitmap");
-			}
-			if (!al_lock_bitmap(sprite_maps_[i].get(), ALLEGRO_PIXEL_FORMAT_ANY, ALLEGRO_LOCK_WRITEONLY)) {
-				throw std::exception("Unable to lock bitmap");
-			}
-			al_set_target_bitmap(sprite_maps_[i].get());
-			al_clear_to_color(rsrc.color(0, i));
-			for (int y = 0; y < 200; ++y) {
-				for (int x = 0; x < 320; ++x) {
-					size_t offset = (y * 320) + x + 7;	// 7 is BLOAD magic header size;
-					if (offset >= raw.size()) { break; }
-					unsigned char color = static_cast<unsigned char>(raw[offset]);
-					al_put_pixel(x, y, rsrc.color(color, i));
-				}
-			}
-			al_unlock_bitmap(sprite_maps_[i].get());
+			sprite_maps_[i] = bload_convert(raw, rsrc.palette(i));
 		}
 	}
 
@@ -212,14 +271,13 @@ int main(int argc, char **argv) {
 
 	DisplayPtr dptr{ al_create_display(640, 400) };
 
-	auto t1 = al_get_time();
+	
 	ResourceBin rsrc{ "RESOURCE.BIN" };
-	auto t2 = al_get_time();
 	SpritesBin sprites{ rsrc, "SPRITES.BIN" };
-	auto t3 = al_get_time();
-	std::cout << "t2 - t1: " << t2 - t1 << std::endl;
-	std::cout << "t3 - t2: " << t3 - t2 << std::endl;
-	std::cout << "t3 - t1: " << t3 - t1 << std::endl;
+	
+	Buffer raw;
+	if (!bload_file("TITLE.BIN", raw)) { exit(1); }
+	BitmapPtr bgrd{ bload_convert(raw, rsrc.menu_palette()) };
 
 	
 	if (!al_reserve_samples(rsrc.num_samples())) {
@@ -227,12 +285,13 @@ int main(int argc, char **argv) {
 		exit(1);
 	}
 
-	al_set_target_backbuffer(dptr.get());
+	//al_set_target_backbuffer(dptr.get());
 
 	std::cout << "Enter a sample index [0, " << rsrc.num_samples() << "); invalid to quit: ";
 	int sound_index = 0;
 	size_t pal = 0;
 	al_clear_to_color(al_map_rgb(128, 128, 128));
+	al_draw_scaled_bitmap(bgrd.get(), 0, 0, 320, 200, 0, 0, 640, 400, 0);
 	al_draw_scaled_bitmap(sprites.sprite_map(pal), 0, 0, 16, 16, 50, 50, 100, 100, 0);
 	al_flip_display();
 	while (std::cin >> sound_index) {
@@ -242,6 +301,7 @@ int main(int argc, char **argv) {
 
 		pal = (pal < 2) ? (pal + 1) : 0;
 		al_clear_to_color(al_map_rgb(128, 128, 128));
+		al_draw_scaled_bitmap(bgrd.get(), 0, 0, 320, 200, 0, 0, 640, 400, 0);
 		al_draw_scaled_bitmap(sprites.sprite_map(pal), 0, 0, 320, 200, 0, 0, 640, 400, 0);
 		al_flip_display();
 	}
