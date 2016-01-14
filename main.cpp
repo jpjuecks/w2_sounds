@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include <iostream>
+#include <iterator>
 #include <fstream>
 #include <vector>
 #include <array>
@@ -171,141 +172,143 @@ enum ACTOR_ACTION {
 	ACTION_MAX
 };
 
+// constexpr function templated on a variadic list of integer values
+// returns a constexpr std::array containing all the values plus a trailer
+// [negative] value that controls what happens when the end of the sequence
+// is reached:
+//	* if looped == true (default), the trailer value will restart the sequence
+//	* if looped == false, the trailer value will "park" the animation on its final frame
+template<int... frame_numbers>
+constexpr std::array<int, sizeof...(frame_numbers)+1> make_seq(bool looped = true) {
+	return{ frame_numbers..., looped ? -static_cast<int>(sizeof...(frame_numbers)) : -1 };
+}
+
 // Define the master data table of all animation frame sequence numbers for various actors/directions/actions
 // as a macro that uses the currently-undefined function macro X().
 #undef X
+#define LOOP true
+#define ONCE false
 #define MODEL_ACTION_SEQUENCE_TABLE \
 	/* Cuby and Coby are cononical actors */ \
-	X(CUBY, DOWN, IDLE, 1) \
-	X(CUBY, DOWN, MOVE, 1, 2, 1, 0) \
-	X(CUBY, DOWN, FIRE, 3) \
-	X(CUBY, LEFT, IDLE, 5) \
-	X(CUBY, LEFT, MOVE, 5, 6, 5, 4) \
-	X(CUBY, LEFT, FIRE, 7) \
-	X(CUBY, UP, IDLE, 9) \
-	X(CUBY, UP, MOVE, 9, 10, 9, 8) \
-	X(CUBY, UP, FIRE, 11) \
-	X(CUBY, RIGHT, IDLE, 13) \
-	X(CUBY, RIGHT, MOVE, 13, 14, 13, 12) \
-	X(CUBY, RIGHT, FIRE, 15) \
-	X(CUBY, NA, YAHOO, 16, 17, 18) \
-	X(COBY, DOWN, IDLE, 21) \
-	X(COBY, DOWN, MOVE, 21, 22, 21, 20) \
-	X(COBY, DOWN, FIRE, 23) \
-	X(COBY, LEFT, IDLE, 25) \
-	X(COBY, LEFT, MOVE, 25, 26, 25, 24) \
-	X(COBY, LEFT, FIRE, 27) \
-	X(COBY, UP, IDLE, 29) \
-	X(COBY, UP, MOVE, 29, 30, 29, 28) \
-	X(COBY, UP, FIRE, 31) \
-	X(COBY, RIGHT, IDLE, 33) \
-	X(COBY, RIGHT, MOVE, 33, 34, 33, 32) \
-	X(COBY, RIGHT, FIRE, 35) \
-	X(COBY, NA, YAHOO, 36, 37, 38) \
-	/* Bees have no idle/fire sequences */ \
-	X(BEE, NA, NA, 41) \
-	X(BEE, DOWN, MOVE, 41, 42, 41, 40) \
-	X(BEE, LEFT, MOVE, 44, 45, 44, 43) \
-	X(BEE, UP, MOVE, 47, 48, 47, 46) \
-	X(BEE, RIGHT, MOVE, 50, 51, 50, 49) \
+	X(CUBY, DOWN, IDLE, ONCE, 1) \
+	X(CUBY, DOWN, MOVE, LOOP, 1, 2, 1, 0) \
+	X(CUBY, DOWN, FIRE, ONCE, 3) \
+	X(CUBY, LEFT, IDLE, ONCE, 5) \
+	X(CUBY, LEFT, MOVE, LOOP, 5, 6, 5, 4) \
+	X(CUBY, LEFT, FIRE, ONCE, 7) \
+	X(CUBY, UP, IDLE, ONCE, 9) \
+	X(CUBY, UP, MOVE, LOOP, 9, 10, 9, 8) \
+	X(CUBY, UP, FIRE, ONCE, 11) \
+	X(CUBY, RIGHT, IDLE, ONCE, 13) \
+	X(CUBY, RIGHT, MOVE, LOOP, 13, 14, 13, 12) \
+	X(CUBY, RIGHT, FIRE, ONCE, 15) \
+	X(CUBY, NA, YAHOO, LOOP, 16, 17, 18) \
+	X(COBY, DOWN, IDLE, ONCE, 21) \
+	X(COBY, DOWN, MOVE, LOOP, 21, 22, 21, 20) \
+	X(COBY, DOWN, FIRE, ONCE, 23) \
+	X(COBY, LEFT, IDLE, ONCE, 25) \
+	X(COBY, LEFT, MOVE, LOOP, 25, 26, 25, 24) \
+	X(COBY, LEFT, FIRE, ONCE, 27) \
+	X(COBY, UP, IDLE, ONCE, 29) \
+	X(COBY, UP, MOVE, LOOP, 29, 30, 29, 28) \
+	X(COBY, UP, FIRE, ONCE, 31) \
+	X(COBY, RIGHT, IDLE, ONCE, 33) \
+	X(COBY, RIGHT, MOVE, LOOP, 33, 34, 33, 32) \
+	X(COBY, RIGHT, FIRE, ONCE, 35) \
+	X(COBY, NA, YAHOO, ONCE, 36, 37, 38) \
+	/* Bees have no real idle/fire sequences */ \
+	X(BEE, DOWN, NA, ONCE, 41) \
+	X(BEE, DOWN, MOVE, LOOP, 41, 42, 41, 40) \
+	X(BEE, LEFT, NA, ONCE, 44) \
+	X(BEE, LEFT, MOVE, LOOP, 44, 45, 44, 43) \
+	X(BEE, UP, NA, ONCE, 47) \
+	X(BEE, UP, MOVE, LOOP, 47, 48, 47, 46) \
+	X(BEE, RIGHT, NA, ONCE, 50) \
+	X(BEE, RIGHT, MOVE, LOOP, 50, 51, 50, 49) \
 	/* Worms have no idle/fire sequences; just LONG movement sequences! */ \
-	X(WORM, NA, NA, 60) \
-	X(WORM, DOWN, MOVE, 52, 53, 54, 55, 56, 57, 58, 59) \
-	X(WORM, LEFT, MOVE, 60, 67, 66, 65, 64, 63, 62, 61) \
-	X(WORM, UP, MOVE, 59, 58, 57, 56, 55, 54, 53, 52) \
-	X(WORM, RIGHT, MOVE, 60, 61, 62, 63, 64, 65, 66, 67) \
+	X(WORM, NA, NA, ONCE, 60) \
+	X(WORM, DOWN, MOVE, LOOP, 52, 53, 54, 55, 56, 57, 58, 59) \
+	X(WORM, LEFT, MOVE, LOOP, 60, 67, 66, 65, 64, 63, 62, 61) \
+	X(WORM, UP, MOVE, LOOP, 59, 58, 57, 56, 55, 54, 53, 52) \
+	X(WORM, RIGHT, MOVE, LOOP, 60, 61, 62, 63, 64, 65, 66, 67) \
 	/* Sharks have no idle/fire sequences (they also move diagonally;
 		"DOWN" = SW, "LEFT" = NW, "UP" = NE, "RIGHT" = SE */ \
-	X(SHARK, NA, NA, 69) \
-	X(SHARK, DOWN, MOVE, 69, 70, 69, 68) \
-	X(SHARK, LEFT, MOVE, 72, 73, 72, 71) \
-	X(SHARK, UP, MOVE, 75, 76, 75, 74) \
-	X(SHARK, RIGHT, MOVE, 78, 79, 78, 77) \
+	X(SHARK, DOWN, NA, ONCE, 69) \
+	X(SHARK, DOWN, MOVE, LOOP, 69, 70, 69, 68) \
+	X(SHARK, LEFT, NA, ONCE, 72) \
+	X(SHARK, LEFT, MOVE, LOOP, 72, 73, 72, 71) \
+	X(SHARK, UP, NA, ONCE, 75) \
+	X(SHARK, UP, MOVE, LOOP, 75, 76, 75, 74) \
+	X(SHARK, RIGHT, NA, LOOP, 78) \
+	X(SHARK, RIGHT, MOVE, LOOP, 78, 79, 78, 77) \
 	/* Ghosts are canonical actors (except for having no dedicated IDLE stance */ \
-	X(GHOST, DOWN, MOVE, 80) \
-	X(GHOST, DOWN, FIRE, 80, 81, 82) \
-	X(GHOST, LEFT, MOVE, 83) \
-	X(GHOST, LEFT, FIRE, 83, 84, 85) \
-	X(GHOST, UP, MOVE, 86) \
-	X(GHOST, UP, FIRE, 86, 87, 88) \
-	X(GHOST, RIGHT, MOVE, 89) \
-	X(GHOST, RIGHT, FIRE, 89, 90, 91)
+	X(GHOST, DOWN, MOVE, ONCE, 80) \
+	X(GHOST, DOWN, FIRE, ONCE, 80, 81, 82) \
+	X(GHOST, LEFT, MOVE, ONCE, 83) \
+	X(GHOST, LEFT, FIRE, ONCE, 83, 84, 85) \
+	X(GHOST, UP, MOVE, ONCE, 86) \
+	X(GHOST, UP, FIRE, ONCE, 86, 87, 88) \
+	X(GHOST, RIGHT, MOVE, ONCE, 89) \
+	X(GHOST, RIGHT, FIRE, ONCE, 89, 90, 91)
 
-// Define an array of animation sequence frame numbers (terminated by -1)
-using frame_seq_t = const int[MAX_SEQUENCE_FRAMES + 1];
-#define X(Actor, Direction, Action, ...) { __VA_ARGS__, -1 },
-static frame_seq_t actor_frame_sequences[] = {
-	MODEL_ACTION_SEQUENCE_TABLE
-};
+
+	// Define an array of animation sequence frame numbers (terminated by -1)
+#define X(Actor, Direction, Action, Mode, ...) \
+	static auto Actor##_##Direction##_##Action = make_seq<__VA_ARGS__>(Mode);
+MODEL_ACTION_SEQUENCE_TABLE
 #undef X
 
-// Define a parallel enum of animation sequence IDs
-#define X(Actor, Direction, Action, ...) Actor##_##Direction##_##Action, 
-enum ACTOR_SEQUENCE {
-	MODEL_ACTION_SEQUENCE_TABLE
-};
-#undef X
+#undef LOOP
+#undef ONCE
 
 // Master actor model mapping table (mapping modelID -> direction -> action -> ptr to sequence
-using actor_model_t = frame_seq_t * const[DIR_MAX][ACTION_MAX];
+using actor_model_t = const int * const[DIR_MAX][ACTION_MAX];
 static actor_model_t actor_models[] = {
 	{	// ACTOR_CUBY
-		{ &actor_frame_sequences[CUBY_DOWN_IDLE], &actor_frame_sequences[CUBY_DOWN_MOVE], &actor_frame_sequences[CUBY_DOWN_FIRE] },
-		{ &actor_frame_sequences[CUBY_LEFT_IDLE], &actor_frame_sequences[CUBY_LEFT_MOVE], &actor_frame_sequences[CUBY_LEFT_FIRE] },
-		{ &actor_frame_sequences[CUBY_UP_IDLE], &actor_frame_sequences[CUBY_UP_MOVE], &actor_frame_sequences[CUBY_UP_FIRE] },
-		{ &actor_frame_sequences[CUBY_RIGHT_IDLE], &actor_frame_sequences[CUBY_RIGHT_MOVE], &actor_frame_sequences[CUBY_RIGHT_FIRE] },
+		{ CUBY_DOWN_IDLE.data(), CUBY_DOWN_MOVE.data(), CUBY_DOWN_FIRE.data() },
+		{ CUBY_LEFT_IDLE.data(), CUBY_LEFT_MOVE.data(), CUBY_LEFT_FIRE.data() },
+		{ CUBY_UP_IDLE.data(), CUBY_UP_MOVE.data(), CUBY_UP_FIRE.data() },
+		{ CUBY_RIGHT_IDLE.data(), CUBY_RIGHT_MOVE.data(), CUBY_RIGHT_FIRE.data() },
 	},
 	{	// ACTOR_COBY
-		{ &actor_frame_sequences[COBY_DOWN_IDLE], &actor_frame_sequences[COBY_DOWN_MOVE], &actor_frame_sequences[COBY_DOWN_FIRE] },
-		{ &actor_frame_sequences[COBY_LEFT_IDLE], &actor_frame_sequences[COBY_LEFT_MOVE], &actor_frame_sequences[COBY_LEFT_FIRE] },
-		{ &actor_frame_sequences[COBY_UP_IDLE], &actor_frame_sequences[COBY_UP_MOVE], &actor_frame_sequences[COBY_UP_FIRE] },
-		{ &actor_frame_sequences[COBY_RIGHT_IDLE], &actor_frame_sequences[COBY_RIGHT_MOVE], &actor_frame_sequences[COBY_RIGHT_FIRE] },
+		{ COBY_DOWN_IDLE.data(), COBY_DOWN_MOVE.data(), COBY_DOWN_FIRE.data() },
+		{ COBY_LEFT_IDLE.data(), COBY_LEFT_MOVE.data(), COBY_LEFT_FIRE.data() },
+		{ COBY_UP_IDLE.data(), COBY_UP_MOVE.data(), COBY_UP_FIRE.data() },
+		{ COBY_RIGHT_IDLE.data(), COBY_RIGHT_MOVE.data(), COBY_RIGHT_FIRE.data() },
 	},
 	{	// ACTOR_BEE (movement only)
-		{ &actor_frame_sequences[BEE_NA_NA], &actor_frame_sequences[BEE_DOWN_MOVE], &actor_frame_sequences[BEE_NA_NA] },
-		{ &actor_frame_sequences[BEE_NA_NA], &actor_frame_sequences[BEE_LEFT_MOVE], &actor_frame_sequences[BEE_NA_NA] },
-		{ &actor_frame_sequences[BEE_NA_NA], &actor_frame_sequences[BEE_UP_MOVE], &actor_frame_sequences[BEE_NA_NA] },
-		{ &actor_frame_sequences[BEE_NA_NA], &actor_frame_sequences[BEE_RIGHT_MOVE], &actor_frame_sequences[BEE_NA_NA] },
+		{ BEE_DOWN_NA.data(), BEE_DOWN_MOVE.data(), BEE_DOWN_NA.data() },
+		{ BEE_LEFT_NA.data(), BEE_LEFT_MOVE.data(), BEE_LEFT_NA.data() },
+		{ BEE_UP_NA.data(), BEE_UP_MOVE.data(), BEE_UP_NA.data() },
+		{ BEE_RIGHT_NA.data(), BEE_RIGHT_MOVE.data(), BEE_RIGHT_NA.data() },
 	},
 	{	// ACTOR_WORM (movement only)
-		{ &actor_frame_sequences[WORM_NA_NA], &actor_frame_sequences[WORM_DOWN_MOVE], &actor_frame_sequences[WORM_NA_NA] },
-		{ &actor_frame_sequences[WORM_NA_NA], &actor_frame_sequences[WORM_LEFT_MOVE], &actor_frame_sequences[WORM_NA_NA] },
-		{ &actor_frame_sequences[WORM_NA_NA], &actor_frame_sequences[WORM_UP_MOVE], &actor_frame_sequences[WORM_NA_NA] },
-		{ &actor_frame_sequences[WORM_NA_NA], &actor_frame_sequences[WORM_RIGHT_MOVE], &actor_frame_sequences[WORM_NA_NA] },
+		{ WORM_NA_NA.data(), WORM_DOWN_MOVE.data(), WORM_NA_NA.data() },
+		{ WORM_NA_NA.data(), WORM_LEFT_MOVE.data(), WORM_NA_NA.data() },
+		{ WORM_NA_NA.data(), WORM_UP_MOVE.data(), WORM_NA_NA.data() },
+		{ WORM_NA_NA.data(), WORM_RIGHT_MOVE.data(), WORM_NA_NA.data() },
 	},
-	{	// ACTOR_WORM (movement only [and that's diagnoal movement, unfortunately])
-		{ &actor_frame_sequences[SHARK_NA_NA], &actor_frame_sequences[SHARK_DOWN_MOVE], &actor_frame_sequences[SHARK_NA_NA] },
-		{ &actor_frame_sequences[SHARK_NA_NA], &actor_frame_sequences[SHARK_LEFT_MOVE], &actor_frame_sequences[SHARK_NA_NA] },
-		{ &actor_frame_sequences[SHARK_NA_NA], &actor_frame_sequences[SHARK_UP_MOVE], &actor_frame_sequences[SHARK_NA_NA] },
-		{ &actor_frame_sequences[SHARK_NA_NA], &actor_frame_sequences[SHARK_RIGHT_MOVE], &actor_frame_sequences[SHARK_NA_NA] },
+	{	// ACTOR_WORM (movement only [and that's diagnoal movement.data(), unfortunately])
+		{ SHARK_DOWN_NA.data(), SHARK_DOWN_MOVE.data(), SHARK_DOWN_NA.data() },
+		{ SHARK_LEFT_NA.data(), SHARK_LEFT_MOVE.data(), SHARK_LEFT_NA.data() },
+		{ SHARK_UP_NA.data(), SHARK_UP_MOVE.data(), SHARK_UP_NA.data() },
+		{ SHARK_RIGHT_NA.data(), SHARK_RIGHT_MOVE.data(), SHARK_RIGHT_NA.data() },
 	},
 	{	// ACTOR_GHOST
-		{ &actor_frame_sequences[GHOST_DOWN_MOVE], &actor_frame_sequences[GHOST_DOWN_MOVE], &actor_frame_sequences[GHOST_DOWN_FIRE] },
-		{ &actor_frame_sequences[GHOST_LEFT_MOVE], &actor_frame_sequences[GHOST_LEFT_MOVE], &actor_frame_sequences[GHOST_LEFT_FIRE] },
-		{ &actor_frame_sequences[GHOST_UP_MOVE], &actor_frame_sequences[GHOST_UP_MOVE], &actor_frame_sequences[GHOST_UP_FIRE] },
-		{ &actor_frame_sequences[GHOST_RIGHT_MOVE], &actor_frame_sequences[GHOST_RIGHT_MOVE], &actor_frame_sequences[GHOST_RIGHT_FIRE] },
+		{ GHOST_DOWN_MOVE.data(), GHOST_DOWN_MOVE.data(), GHOST_DOWN_FIRE.data() },
+		{ GHOST_LEFT_MOVE.data(), GHOST_LEFT_MOVE.data(), GHOST_LEFT_FIRE.data() },
+		{ GHOST_UP_MOVE.data(), GHOST_UP_MOVE.data(), GHOST_UP_FIRE.data() },
+		{ GHOST_RIGHT_MOVE.data(), GHOST_RIGHT_MOVE.data(), GHOST_RIGHT_FIRE.data() },
 	},
 };
 
 class Actor {
 public:
 	Actor(const actor_model_t& model, int rate = 0) :
-		model_(model), dir_(DIR_DOWN), action_(ACTION_IDLE),
+		model_(&model), dir_(DIR_DOWN), action_(ACTION_IDLE),
 		seq_(nullptr), ttl_(0), rate_(rate), frame_(0)
 	{
 		reset();
-	}
-
-	Actor(const Actor& other) = default;
-	Actor(Actor&& other) = default;
-	~Actor() = default;
-	
-	// Hacky assignment operator to overwrite ourselves with a copy-constructed clone of another Actor
-	// (working around the constness of our actor_model_t)
-	Actor& operator=(const Actor& other) {
-		this->~Actor();
-		new (this) Actor(other);
-		return *this;
 	}
 
 	void set_rate(int rate) {
@@ -334,11 +337,11 @@ public:
 		// Framerate delay check
 		if (rate_ && (--ttl_ > 0)) {
 			// Still counting down; give them the last frame...
-			return (*seq_)[frame_];
+			return seq_[frame_];
 		}
 		else {
 			ttl_ = rate_;
-			int next = (*seq_)[++frame_];
+			int next = seq_[++frame_];
 			if (next < 0) {
 				// Hit the end; reset frame_ to -1 and try again
 				frame_ = (rate_ ? 0 : -1);
@@ -350,25 +353,24 @@ public:
 
 private:
 	void reset() {
-		seq_ = model_[dir_][action_];
+		seq_ = (*model_)[dir_][action_];
 		frame_ = (rate_ ? 0 : -1);
 		ttl_ = rate_;
 	}
 
-	const actor_model_t &model_;
+	const actor_model_t *model_;
 
 	ACTOR_DIRECTION dir_;
 	ACTOR_ACTION action_;
 
-	frame_seq_t *seq_;
+	const int *seq_;
 	int rate_;
 	int ttl_;
 	int frame_;
 };
 
+
 int main(int argc, char **argv) {
-	std::cout << "sizeof(actor_frame_sequences) -> " << sizeof(actor_frame_sequences) << std::endl;
-	std::cout << "sizeof(actor_models) -> " << sizeof(actor_models) << std::endl;
 	startup();
 
 	EventQueuePtr events{ al_create_event_queue() };
@@ -400,8 +402,7 @@ int main(int argc, char **argv) {
 	crab.add_frame(sprites.sprite(94));
 	crab.animate(10);*/
 
-	Actor cuby{ actor_models[ACTOR_WORM] };
-	cuby.set_rate(5);
+	Actor cuby{ actor_models[ACTOR_CUBY], 6 };
 
 	RenderBuffer frame_buff;	// All rendering goes here...
 	al_start_timer(timer.get());
