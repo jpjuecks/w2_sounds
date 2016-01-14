@@ -138,7 +138,168 @@ public:
 	}
 };
 
+static constexpr size_t MAX_SEQUENCE_FRAMES{ 8 };
+
+// Define enum for actor ID
+enum ACTOR_MODEL {
+	ACTOR_CUBY,
+	ACTOR_COBY,
+	ACTOR_BEE,
+	ACTOR_WORM,
+	ACTOR_SHARK,
+	ACTOR_GHOST,
+	ACTOR_PUTTY,
+	ACTOR_MOUSE,
+	ACTOR_PENGUIN,
+	ACTOR_MAX
+};
+
+// Define enum for direction
+enum ACTOR_DIRECTION {
+	DIR_DOWN,
+	DIR_LEFT,
+	DIR_UP,
+	DIR_RIGHT,
+	DIR_MAX
+};
+
+// Define enum for actions
+enum ACTOR_ACTION {
+	ACTION_IDLE,
+	ACTION_MOVE,
+	ACTION_FIRE,
+	ACTION_MAX
+};
+
+// Define the master data table of all animation frame sequence numbers for various actors/directions/actions
+// as a macro that uses the currently-undefined function macro X().
+#undef X
+#define ANIMATION_SEQUENCE_TABLE \
+	X(CUBY, DOWN, IDLE, 1) \
+	X(CUBY, DOWN, MOVE, 1, 2, 1, 0) \
+	X(CUBY, DOWN, FIRE, 3) \
+	X(CUBY, LEFT, IDLE, 5) \
+	X(CUBY, LEFT, MOVE, 5, 6, 5, 4) \
+	X(CUBY, LEFT, FIRE, 7) \
+	X(CUBY, UP, IDLE, 9) \
+	X(CUBY, UP, MOVE, 9, 10, 9, 8) \
+	X(CUBY, UP, FIRE, 11) \
+	X(CUBY, RIGHT, IDLE, 13) \
+	X(CUBY, RIGHT, MOVE, 13, 14, 13, 12) \
+	X(CUBY, RIGHT, FIRE, 15) \
+	X(COBY, DOWN, IDLE, 21) \
+	X(COBY, DOWN, MOVE, 21, 22, 21, 20) \
+	X(COBY, DOWN, FIRE, 23) \
+	X(COBY, LEFT, IDLE, 25) \
+	X(COBY, LEFT, MOVE, 25, 26, 25, 24) \
+	X(COBY, LEFT, FIRE, 27) \
+	X(COBY, UP, IDLE, 29) \
+	X(COBY, UP, MOVE, 29, 30, 29, 28) \
+	X(COBY, UP, FIRE, 31) \
+	X(COBY, RIGHT, IDLE, 33) \
+	X(COBY, RIGHT, MOVE, 33, 34, 33, 32) \
+	X(COBY, RIGHT, FIRE, 35)
+
+// Define an array of animation sequence frame numbers (terminated by -1)
+using frame_seq_t = const int[MAX_SEQUENCE_FRAMES + 1];
+#define X(Actor, Direction, Action, ...) { __VA_ARGS__, -1 },
+static frame_seq_t actor_frame_sequences[] = {
+	ANIMATION_SEQUENCE_TABLE
+};
+#undef X
+
+// Define a parallel enum of animation sequence IDs
+#define X(Actor, Direction, Action, ...) Actor##_##Direction##_##Action, 
+enum ACTOR_SEQUENCE {
+	ANIMATION_SEQUENCE_TABLE
+};
+#undef X
+
+// Master actor model mapping table (mapping modelID -> direction -> action -> ptr to sequence
+using actor_model_t = frame_seq_t * const[DIR_MAX][ACTION_MAX];
+static actor_model_t actor_models[] = {
+	{
+		{ &actor_frame_sequences[CUBY_DOWN_IDLE], &actor_frame_sequences[CUBY_DOWN_MOVE], &actor_frame_sequences[CUBY_DOWN_FIRE] },
+		{ &actor_frame_sequences[CUBY_LEFT_IDLE], &actor_frame_sequences[CUBY_LEFT_MOVE], &actor_frame_sequences[CUBY_LEFT_FIRE] },
+		{ &actor_frame_sequences[CUBY_UP_IDLE], &actor_frame_sequences[CUBY_UP_MOVE], &actor_frame_sequences[CUBY_UP_FIRE] },
+		{ &actor_frame_sequences[CUBY_RIGHT_IDLE], &actor_frame_sequences[CUBY_RIGHT_MOVE], &actor_frame_sequences[CUBY_RIGHT_FIRE] },
+	},
+	{
+		{ &actor_frame_sequences[COBY_DOWN_IDLE], &actor_frame_sequences[COBY_DOWN_MOVE], &actor_frame_sequences[COBY_DOWN_FIRE] },
+		{ &actor_frame_sequences[COBY_LEFT_IDLE], &actor_frame_sequences[COBY_LEFT_MOVE], &actor_frame_sequences[COBY_LEFT_FIRE] },
+		{ &actor_frame_sequences[COBY_UP_IDLE], &actor_frame_sequences[COBY_UP_MOVE], &actor_frame_sequences[COBY_UP_FIRE] },
+		{ &actor_frame_sequences[COBY_RIGHT_IDLE], &actor_frame_sequences[COBY_RIGHT_MOVE], &actor_frame_sequences[COBY_RIGHT_FIRE] },
+	},
+};
+
+class Actor {
+public:
+	Actor(const actor_model_t& model) :
+		model_(model), dir_(DIR_DOWN), action_(ACTION_IDLE),
+		seq_(nullptr), ttl_(0), rate_(0), frame_(0)
+	{
+		reset();
+	}
+
+	void set_rate(int rate) {
+		rate_ = rate;
+		ttl_ = rate;
+		reset();
+	}
+
+	void set_dir(ACTOR_DIRECTION dir) {
+		dir_ = dir;
+		reset();
+	}
+
+	void set_action(ACTOR_ACTION action) {
+		action_ = action;
+		reset();
+	}
+
+	void set_both(ACTOR_DIRECTION dir, ACTOR_ACTION action) {
+		dir_ = dir;
+		action_ = action;
+		reset();
+	}
+
+	int next_frame() {
+		// Framerate delay check
+		if (rate_ && (--ttl_ > 0)) {
+			// Still counting down; give them the last frame...
+			return (*seq_)[frame_];
+		}
+		else {
+			ttl_ = rate_;
+			int next = (*seq_)[++frame_];
+			if (next < 0) {
+				// Hit the end; reset frame_ to -1 and try again
+				frame_ = (rate_ ? 0 : -1);
+				return next_frame();
+			}
+			return next;
+		}
+	}
+
+private:
+	void reset() {
+		seq_ = model_[dir_][action_];
+		frame_ = (rate_ ? 0 : -1);
+	}
+
+	const actor_model_t &model_;
+
+	ACTOR_DIRECTION dir_;
+	ACTOR_ACTION action_;
+
+	frame_seq_t *seq_;
+	int rate_;
+	int ttl_;
+	int frame_;
+};
+
 int main(int argc, char **argv) {
+	std::cout << "sizeof(actor_models) -> " << sizeof(actor_models) << std::endl;
 	startup();
 
 	EventQueuePtr events{ al_create_event_queue() };
@@ -164,11 +325,14 @@ int main(int argc, char **argv) {
 	BitmapPtr bgrd{ bload_image("TITLE.BIN", rsrc.menu_palette()) };
 	if (!bgrd) { allegro_die("Unable to BLOAD TITLE.BIN"); }
 
-	SpriteObj crab{ sprites.sprite(93), VGA13_WIDTH / 2.0f, VGA13_HEIGHT / 2.0f };
+	/*SpriteObj crab{ sprites.sprite(93), VGA13_WIDTH / 2.0f, VGA13_HEIGHT / 2.0f };
 	crab.add_frame(sprites.sprite(92));
 	crab.add_frame(sprites.sprite(93));
 	crab.add_frame(sprites.sprite(94));
-	crab.animate(10);
+	crab.animate(10);*/
+
+	Actor cuby{ actor_models[ACTOR_COBY] };
+	cuby.set_rate(10);
 
 	RenderBuffer frame_buff;	// All rendering goes here...
 	al_start_timer(timer.get());
@@ -186,16 +350,20 @@ int main(int argc, char **argv) {
 		case ALLEGRO_EVENT_KEY_DOWN:
 			switch (evt.keyboard.keycode) {
 			case ALLEGRO_KEY_LEFT:
-				crab.set_dx(-1.0f);
+				//crab.set_dx(-1.0f);
+				cuby.set_both(DIR_LEFT, ACTION_MOVE);
 				break;
 			case ALLEGRO_KEY_RIGHT:
-				crab.set_dx(1.0f);
+				//crab.set_dx(1.0f);
+				cuby.set_both(DIR_RIGHT, ACTION_MOVE);
 				break;
 			case ALLEGRO_KEY_UP:
-				crab.set_dy(-1.0f);
+				//crab.set_dy(-1.0f);
+				cuby.set_both(DIR_UP, ACTION_MOVE);
 				break;
 			case ALLEGRO_KEY_DOWN:
-				crab.set_dy(1.0f);
+				//crab.set_dy(1.0f);
+				cuby.set_both(DIR_DOWN, ACTION_MOVE);
 				break;
 			case ALLEGRO_KEY_ESCAPE:
 				done = true;
@@ -206,11 +374,12 @@ int main(int argc, char **argv) {
 			switch (evt.keyboard.keycode) {
 			case ALLEGRO_KEY_LEFT:
 			case ALLEGRO_KEY_RIGHT:
-				crab.set_dx(0);
-				break;
+				//crab.set_dx(0);
+				//break;
 			case ALLEGRO_KEY_UP:
 			case ALLEGRO_KEY_DOWN:
-				crab.set_dy(0);
+				//crab.set_dy(0);
+				cuby.set_action(ACTION_IDLE);
 				break;
 			}
 			break;
@@ -258,7 +427,7 @@ int main(int argc, char **argv) {
 			break;
 		case ALLEGRO_EVENT_TIMER:
 			if (evt.timer.source == timer.get()) {
-				crab.update();
+				//crab.update();
 				render = true;
 			}
 			break;
@@ -267,7 +436,8 @@ int main(int argc, char **argv) {
 		if (render && al_is_event_queue_empty(events.get())) {
 			al_draw_bitmap(bgrd.get(), 0, 0, 0);
 			//al_draw_bitmap(sprites.sprite_map(pal), 0, 0, 0);
-			crab.render();
+			//crab.render();
+			al_draw_bitmap(sprites.sprite(cuby.next_frame()), 160, 100, 0);
 			frame_buff.flip(dptr.get());
 			render = false;
 		}
