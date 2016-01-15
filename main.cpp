@@ -249,15 +249,48 @@ constexpr std::array<int, sizeof...(frame_numbers)+1> make_seq(bool looped = tru
 	X(GHOST, UP, MOVE, ONCE, 86) \
 	X(GHOST, UP, FIRE, ONCE, 86, 87, 88) \
 	X(GHOST, RIGHT, MOVE, ONCE, 89) \
-	X(GHOST, RIGHT, FIRE, ONCE, 89, 90, 91)
-
+	X(GHOST, RIGHT, FIRE, ONCE, 89, 90, 91) \
+	/* Putties are canonical actors (except for no real idle) */ \
+	X(PUTTY, DOWN, IDLE, ONCE, 93) \
+	X(PUTTY, DOWN, MOVE, LOOP, 93, 94, 93, 92) \
+	X(PUTTY, DOWN, FIRE, ONCE, 104) \
+	X(PUTTY, LEFT, IDLE, ONCE, 96) \
+	X(PUTTY, LEFT, MOVE, LOOP, 96, 97, 96, 95) \
+	X(PUTTY, LEFT, FIRE, ONCE, 105) \
+	X(PUTTY, UP, IDLE, ONCE, 99) \
+	X(PUTTY, UP, MOVE, LOOP, 99, 100, 99, 98) \
+	X(PUTTY, UP, FIRE, ONCE, 106) \
+	X(PUTTY, RIGHT, IDLE, ONCE, 102) \
+	X(PUTTY, RIGHT, MOVE, LOOP, 102, 103, 102, 101) \
+	X(PUTTY, RIGHT, FIRE, ONCE, 107) \
+	/* Like bees, mice have no real idle/fire sequences */ \
+	X(MOUSE, DOWN, NA, ONCE, 109) \
+	X(MOUSE, DOWN, MOVE, LOOP, 109, 110, 109, 108) \
+	X(MOUSE, LEFT, NA, ONCE, 112) \
+	X(MOUSE, LEFT, MOVE, LOOP, 112, 113, 112, 111) \
+	X(MOUSE, UP, NA, ONCE, 115) \
+	X(MOUSE, UP, MOVE, LOOP, 115, 116, 115, 114) \
+	X(MOUSE, RIGHT, NA, ONCE, 118) \
+	X(MOUSE, RIGHT, MOVE, LOOP, 118, 119, 118, 117) \
+	/* Penguins are canonical actors (except for no real idle) */ \
+	X(PENGUIN, DOWN, IDLE, ONCE, 121) \
+	X(PENGUIN, DOWN, MOVE, LOOP, 121, 122, 121, 120) \
+	X(PENGUIN, DOWN, FIRE, ONCE, 132) \
+	X(PENGUIN, LEFT, IDLE, ONCE, 124) \
+	X(PENGUIN, LEFT, MOVE, LOOP, 124, 125, 124, 123) \
+	X(PENGUIN, LEFT, FIRE, ONCE, 133) \
+	X(PENGUIN, UP, IDLE, ONCE, 127) \
+	X(PENGUIN, UP, MOVE, LOOP, 127, 128, 127, 126) \
+	X(PENGUIN, UP, FIRE, ONCE, 134) \
+	X(PENGUIN, RIGHT, IDLE, ONCE, 130) \
+	X(PENGUIN, RIGHT, MOVE, LOOP, 130, 131, 130, 129) \
+	X(PENGUIN, RIGHT, FIRE, ONCE, 135)
 
 	// Define an array of animation sequence frame numbers (terminated by -1)
 #define X(Actor, Direction, Action, Mode, ...) \
 	static auto Actor##_##Direction##_##Action = make_seq<__VA_ARGS__>(Mode);
 MODEL_ACTION_SEQUENCE_TABLE
 #undef X
-
 #undef LOOP
 #undef ONCE
 
@@ -300,6 +333,43 @@ static actor_model_t actor_models[] = {
 		{ GHOST_UP_MOVE.data(), GHOST_UP_MOVE.data(), GHOST_UP_FIRE.data() },
 		{ GHOST_RIGHT_MOVE.data(), GHOST_RIGHT_MOVE.data(), GHOST_RIGHT_FIRE.data() },
 	},
+	{	// ACTOR_PUTTY
+		{ PUTTY_DOWN_IDLE.data(), PUTTY_DOWN_MOVE.data(), PUTTY_DOWN_FIRE.data() },
+		{ PUTTY_LEFT_IDLE.data(), PUTTY_LEFT_MOVE.data(), PUTTY_LEFT_FIRE.data() },
+		{ PUTTY_UP_IDLE.data(), PUTTY_UP_MOVE.data(), PUTTY_UP_FIRE.data() },
+		{ PUTTY_RIGHT_IDLE.data(), PUTTY_RIGHT_MOVE.data(), PUTTY_RIGHT_FIRE.data() },
+	},
+	{	// ACTOR_MOUSE (movement only)
+		{ MOUSE_DOWN_NA.data(), MOUSE_DOWN_MOVE.data(), MOUSE_DOWN_NA.data() },
+		{ MOUSE_LEFT_NA.data(), MOUSE_LEFT_MOVE.data(), MOUSE_LEFT_NA.data() },
+		{ MOUSE_UP_NA.data(), MOUSE_UP_MOVE.data(), MOUSE_UP_NA.data() },
+		{ MOUSE_RIGHT_NA.data(), MOUSE_RIGHT_MOVE.data(), MOUSE_RIGHT_NA.data() },
+	},
+	{	// ACTOR_PENGUIN
+		{ PENGUIN_DOWN_IDLE.data(), PENGUIN_DOWN_MOVE.data(), PENGUIN_DOWN_FIRE.data() },
+		{ PENGUIN_LEFT_IDLE.data(), PENGUIN_LEFT_MOVE.data(), PENGUIN_LEFT_FIRE.data() },
+		{ PENGUIN_UP_IDLE.data(), PENGUIN_UP_MOVE.data(), PENGUIN_UP_FIRE.data() },
+		{ PENGUIN_RIGHT_IDLE.data(), PENGUIN_RIGHT_MOVE.data(), PENGUIN_RIGHT_FIRE.data() },
+	},
+};
+
+class Inputs {
+protected:
+	// Protected concrete storage (can be manipulated by subclasses
+	bool down_, left_, up_, right_, fire_;
+
+public:
+	Inputs() : down_(false), left_(false), up_(false), right_(false), fire_(false) { }
+
+	// Concrete getters for input state
+	bool down() const { return down_; }
+	bool left() const { return left_; }
+	bool up() const { return up_; }
+	bool right() const { return right_; }
+	bool fire() const { return fire_; }
+
+	// Virtual ALLEGRO_EVENT handler
+	virtual void update(const ALLEGRO_EVENT& ev) = 0;
 };
 
 class Actor {
@@ -308,6 +378,12 @@ public:
 		model_(&model), dir_(DIR_DOWN), action_(ACTION_IDLE),
 		seq_(nullptr), ttl_(0), rate_(rate), frame_(0)
 	{
+		reset();
+	}
+
+	void set_model(const actor_model_t& model, int rate = 0) {
+		model_ = &model;
+		rate_ = rate;
 		reset();
 	}
 
@@ -333,28 +409,67 @@ public:
 		reset();
 	}
 
-	int next_frame() {
-		// Framerate delay check
-		if (rate_ && (--ttl_ > 0)) {
-			// Still counting down; give them the last frame...
-			return seq_[frame_];
+	void set_from_inputs(const Inputs& input) {
+		ACTOR_DIRECTION old_dir = dir_;
+		ACTOR_ACTION old_action = action_;
+
+		// Assume IDLE action...
+		action_ = ACTION_IDLE;
+
+		// Check direction
+		if (input.down()) {
+			dir_ = DIR_DOWN;
+			action_ = ACTION_MOVE;
+		} else if (input.left()) {
+			dir_ = DIR_LEFT;
+			action_ = ACTION_MOVE;
 		}
-		else {
-			ttl_ = rate_;
-			int next = seq_[++frame_];
-			if (next < 0) {
-				// Hit the end; reset frame_ to -1 and try again
-				frame_ = (rate_ ? 0 : -1);
-				return next_frame();
-			}
-			return next;
+		else if (input.up()) {
+			dir_ = DIR_UP;
+			action_ = ACTION_MOVE;
+		}
+		else if (input.right()) {
+			dir_ = DIR_RIGHT;
+			action_ = ACTION_MOVE;
+		}
+
+		// Finally, check "fire" button
+		if (input.fire()) {
+			action_ = ACTION_FIRE;
+		}
+
+		// Reset (including the framecounter) ONLY if something changed
+		if ((dir_ != old_dir) || (action_ != old_action)) {
+			reset();
 		}
 	}
+
+	int shape() const {
+		return seq_[frame_];
+	}
+
+	void advance() {
+		// Handle delay between frames (if rate_ != 0)
+		if (rate_ && (--ttl_ > 0)) return;
+
+		ttl_ = rate_;
+		int next_shape = seq_[++frame_];
+		if (next_shape < 0) {
+			frame_ += next_shape;
+		}
+	}
+
+	int shape_advance() {
+		int ret = shape();
+		advance();
+		return ret;
+	}
+
 
 private:
 	void reset() {
 		seq_ = (*model_)[dir_][action_];
-		frame_ = (rate_ ? 0 : -1);
+		frame_ = 0;
 		ttl_ = rate_;
 	}
 
@@ -369,6 +484,58 @@ private:
 	int frame_;
 };
 
+// Translates Allegro keyboard events into Inputs state
+class KeyboardInputs : public Inputs {
+	// Allegro key-code mappings for the movements requested
+	int key_down_, key_left_, key_up_, key_right_, key_fire_;
+public:
+	KeyboardInputs(int key_down, int key_left, int key_up, int key_right, int key_fire) :
+		key_down_(key_down), key_left_(key_left), key_up_(key_up), key_right_(key_right), key_fire_(key_fire)
+	{}
+
+	void update(const ALLEGRO_EVENT& ev) override {
+		if ((ev.type != ALLEGRO_EVENT_KEY_DOWN) && (ev.type != ALLEGRO_EVENT_KEY_UP)) return;
+
+		bool state = (ev.type == ALLEGRO_EVENT_KEY_DOWN) ? true : false;
+		if (ev.keyboard.keycode == key_down_) {
+			down_ = state;
+		}
+		else if (ev.keyboard.keycode == key_left_) {
+			left_ = state;
+		}
+		else if (ev.keyboard.keycode == key_up_) {
+			up_ = state;
+		}
+		else if (ev.keyboard.keycode == key_right_) {
+			right_ = state;
+		}
+		else if (ev.keyboard.keycode == key_fire_) {
+			fire_ = state;
+		}
+	}
+};
+
+struct Position
+{
+	int x, y;
+	int dx, dy;
+	int speed;
+
+	Position(int x_, int y_, int speed_) : x(x_), y(y_), dx(0), dy(0), speed(speed_) { }
+
+	void set_delta_from_inputs(const Inputs& input) {
+		dx = dy = 0;
+		if (input.left()) { dx -= speed; }
+		if (input.right()) { dx += speed; }
+		if (input.up()) { dy -= speed; }
+		if (input.down()) { dy += speed; }
+	}
+
+	void update() {
+		x += dx;
+		y += dy;
+	}
+};
 
 int main(int argc, char **argv) {
 	startup();
@@ -396,13 +563,9 @@ int main(int argc, char **argv) {
 	BitmapPtr bgrd{ bload_image("TITLE.BIN", rsrc.menu_palette()) };
 	if (!bgrd) { allegro_die("Unable to BLOAD TITLE.BIN"); }
 
-	/*SpriteObj crab{ sprites.sprite(93), VGA13_WIDTH / 2.0f, VGA13_HEIGHT / 2.0f };
-	crab.add_frame(sprites.sprite(92));
-	crab.add_frame(sprites.sprite(93));
-	crab.add_frame(sprites.sprite(94));
-	crab.animate(10);*/
-
 	Actor cuby{ actor_models[ACTOR_CUBY], 6 };
+	Position spot{ VGA13_WIDTH / 2, VGA13_HEIGHT / 2, 1 };
+	KeyboardInputs ctrl{ ALLEGRO_KEY_DOWN, ALLEGRO_KEY_LEFT, ALLEGRO_KEY_UP, ALLEGRO_KEY_RIGHT, ALLEGRO_KEY_SPACE };
 
 	RenderBuffer frame_buff;	// All rendering goes here...
 	al_start_timer(timer.get());
@@ -412,6 +575,9 @@ int main(int argc, char **argv) {
 	while (!done) {
 		ALLEGRO_EVENT evt;
 		al_wait_for_event(events.get(), &evt);
+
+		// Update controller status based on event
+		ctrl.update(evt);
 		
 		switch (evt.type) {
 		case ALLEGRO_EVENT_DISPLAY_CLOSE:
@@ -419,55 +585,35 @@ int main(int argc, char **argv) {
 			break;
 		case ALLEGRO_EVENT_KEY_DOWN:
 			switch (evt.keyboard.keycode) {
-			case ALLEGRO_KEY_LEFT:
-				//crab.set_dx(-1.0f);
-				cuby.set_both(DIR_LEFT, ACTION_MOVE);
-				break;
-			case ALLEGRO_KEY_RIGHT:
-				//crab.set_dx(1.0f);
-				cuby.set_both(DIR_RIGHT, ACTION_MOVE);
-				break;
-			case ALLEGRO_KEY_UP:
-				//crab.set_dy(-1.0f);
-				cuby.set_both(DIR_UP, ACTION_MOVE);
-				break;
-			case ALLEGRO_KEY_DOWN:
-				//crab.set_dy(1.0f);
-				cuby.set_both(DIR_DOWN, ACTION_MOVE);
-				break;
 			case ALLEGRO_KEY_ESCAPE:
 				done = true;
 				break;
 			case ALLEGRO_KEY_F1:
-				cuby = Actor{ actor_models[ACTOR_CUBY], 6 };
+				cuby.set_model(actor_models[ACTOR_CUBY], 6);
 				break;
 			case ALLEGRO_KEY_F2:
-				cuby = Actor{ actor_models[ACTOR_COBY], 6 };
+				cuby.set_model(actor_models[ACTOR_COBY], 6);
 				break;
 			case ALLEGRO_KEY_F3:
-				cuby = Actor{ actor_models[ACTOR_BEE], 3 };
+				cuby.set_model(actor_models[ACTOR_BEE], 3);
 				break;
 			case ALLEGRO_KEY_F4:
-				cuby = Actor{ actor_models[ACTOR_WORM], 3 };
+				cuby.set_model(actor_models[ACTOR_WORM], 3);
 				break;
 			case ALLEGRO_KEY_F5:
-				cuby = Actor{ actor_models[ACTOR_SHARK], 6 };
+				cuby.set_model(actor_models[ACTOR_SHARK], 6);
 				break;
 			case ALLEGRO_KEY_F6:
-				cuby = Actor{ actor_models[ACTOR_GHOST], 3 };
+				cuby.set_model(actor_models[ACTOR_GHOST], 3);
 				break;
-			}
-			break;
-		case ALLEGRO_EVENT_KEY_UP:
-			switch (evt.keyboard.keycode) {
-			case ALLEGRO_KEY_LEFT:
-			case ALLEGRO_KEY_RIGHT:
-				//crab.set_dx(0);
-				//break;
-			case ALLEGRO_KEY_UP:
-			case ALLEGRO_KEY_DOWN:
-				//crab.set_dy(0);
-				cuby.set_action(ACTION_IDLE);
+			case ALLEGRO_KEY_F7:
+				cuby.set_model(actor_models[ACTOR_PUTTY], 6);
+				break;
+			case ALLEGRO_KEY_F8:
+				cuby.set_model(actor_models[ACTOR_MOUSE], 6);
+				break;
+			case ALLEGRO_KEY_F9:
+				cuby.set_model(actor_models[ACTOR_PENGUIN], 6);
 				break;
 			}
 			break;
@@ -515,17 +661,22 @@ int main(int argc, char **argv) {
 			break;
 		case ALLEGRO_EVENT_TIMER:
 			if (evt.timer.source == timer.get()) {
-				//crab.update();
 				render = true;
 			}
 			break;
 		}
 
 		if (render && al_is_event_queue_empty(events.get())) {
+			// "Control"
+			cuby.set_from_inputs(ctrl);
+			spot.set_delta_from_inputs(ctrl);
+
+			// "Physics"
+			spot.update();
+
+			// "Render"
 			al_draw_bitmap(bgrd.get(), 0, 0, 0);
-			//al_draw_bitmap(sprites.sprite_map(pal), 0, 0, 0);
-			//crab.render();
-			al_draw_bitmap(sprites.sprite(cuby.next_frame(), pal), 160, 100, 0);
+			al_draw_bitmap(sprites.sprite(cuby.shape_advance(), pal), spot.x, spot.y, 0);
 			frame_buff.flip(dptr.get());
 			render = false;
 		}
