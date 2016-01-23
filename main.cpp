@@ -239,6 +239,12 @@ struct CSprite {
 	int flags;		// Arbitrary flags used by rendering system to alter sprite's appearance
 };
 
+// Component: Palette-sensitive bitmap hack
+struct CPalShape {
+	entity_id_t eid;
+	size_t shape;
+};
+
 // Component: Time/lifecycle
 struct CTimer {
 	entity_id_t eid;
@@ -246,7 +252,7 @@ struct CTimer {
 	unsigned int ttl;		// Decreasing (if > 0) "time-to-live" timer; useful for state changes
 };
 
-// Component: Movement (change in CSprite::x/y and [optionally] CSprite::bitmap based on CTime::ticks)
+// Component: Screen movement (change in CSprite::x/y and [optionally] CSprite::bitmap based on CTime::ticks)
 struct CMotion {
 	entity_id_t eid;
 	float dx, dy;			// Used to modify CSprite::x and CSprite::y
@@ -254,12 +260,46 @@ struct CMotion {
 	unsigned int rate;		// Tick divider used to slow down frame transitions
 };
 
-// Component: Palette-sensitive bitmap hack
-struct CPalShape {
-	entity_id_t eid;
-	size_t shape;
+enum class GridDirection {
+	Down = DIR_DOWN,
+	Left = DIR_LEFT,
+	Up = DIR_UP,
+	Right = DIR_RIGHT
 };
 
+std::pair<float, float> direction_delta(GridDirection dir, float scale = 1.0f) {
+	switch (dir) {
+	case GridDirection::Down:
+		return{ 0.f, scale };
+	case GridDirection::Left:
+		return{ -scale, 0.f };
+	case GridDirection::Up:
+		return{ 0.f, -scale };
+	case GridDirection::Right:
+		return{ scale, 0.f };
+	default:
+		return{ 0.f, 0.f };
+	}
+}
+
+// Component: Grid-based motion control
+struct CGridMoCtrl {
+	entity_id_t eid;
+	bool busy;			// If true, this entity is moving; if not, it is "at rest" and ready for control input
+	bool restless;		// If true, this entity wants to move next chance it gets
+	GridDirection dir;	// Gives the direction an entity "wants" to move at its next "at rest"
+};
+
+// Component: "Hacks" component for general experimentation
+struct CHacks {
+	entity_id_t eid;
+	
+	bool wrap_to_screen;	// If true, wrap this [sprite-equipped] entity to the VGA screen
+
+	Inputs *controller;		// If !nullptr, use this to deduce the intent of our GridMoCtrl (if any)
+
+	actor_model_t* actor;	// If !nullptr, use this to decide which sequence to use for animation
+};
 
 // Compare any 2 components (of the same type) to sort on EID
 template<typename ComponentType>
@@ -276,6 +316,8 @@ ComponentType& insert_component(ContainerType& container, ComponentType&& compon
 	return *place;
 }
 
+// Look up a component of a given type from a container of the same by entity ID (using binary search)
+// If no matching component is found, returns nullptr
 template<typename ComponentType, typename ContainerType = std::vector<ComponentType>>
 ComponentType* lookup_component(ContainerType& container, entity_id_t eid) {
 	auto place = std::lower_bound(container.begin(), container.end(), component compare_components<ComponentType>);
@@ -289,7 +331,7 @@ ComponentType* lookup_component(ContainerType& container, entity_id_t eid) {
 
 // Typedef/consts for bitmask telling what components are available for a given entity
 using component_mask_t = unsigned int;
-const component_mask_t HasSprite = 1, HasPalShape = 2, HasTimer = 4, HasMotion = 8;
+const component_mask_t HasSprite = 1, HasPalShape = 2, HasTimer = 4, HasMotion = 8, HasGridMoCtrl = 16, HasHacks = 32;
 
 // Fwd decl of master system struct
 struct ECS;
@@ -309,10 +351,12 @@ struct Entity {
 		return (cmask & mask);
 	}
 
-	Entity& add_sprite(float x, float y, ALLEGRO_BITMAP* bitmap, int flags = 0);
-	Entity& add_pal_shape(size_t shape);
+	Entity& add_sprite(float x = 0.f, float y = 0.f, ALLEGRO_BITMAP* bitmap = nullptr, int flags = 0);
+	Entity& add_pal_shape(size_t shape = 0);
 	Entity& add_timer(unsigned int ttl = 0);
-	Entity& add_motion(sequence_t animation, unsigned int rate = 1, float dx = 0.0f, float dy = 0.0f);
+	Entity& add_motion(sequence_t animation = nullptr, unsigned int rate = 1, float dx = 0.0f, float dy = 0.0f);
+	Entity& add_grid_mo_ctrl(GridDirection heading = GridDirection::Down, bool is_moving = false);
+	Entity& add_hack(bool wrap_to_screen = true, Inputs *controller = nullptr, actor_model_t *model = nullptr);
 };
 
 struct ECS {
@@ -331,6 +375,8 @@ struct ECS {
 	std::vector<CPalShape> pal_shapes;
 	std::vector<CTimer> timers;
 	std::vector<CMotion> movers;
+	std::vector<CGridMoCtrl> gmcs;
+	std::vector<CHacks> hacks;
 
 	ECS(const SpritesBin& sprites) : sprites_bin{ sprites }, pal{ ResourceBin::PAL_DEFAULT }, eid_seed { 0 } {}
 
@@ -372,18 +418,34 @@ Entity& Entity::add_motion(sequence_t animation, unsigned int rate, float dx, fl
 	return *this;
 }
 
+Entity& Entity::add_grid_mo_ctrl(GridDirection heading, bool is_moving) {
+	insert_component<CGridMoCtrl>(sys.gmcs, { id, is_moving, is_moving, heading });
+	cmask = cmask | HasGridMoCtrl;
+	return *this;
+}
+
+Entity& Entity::add_hack(bool wrap_to_screen, Inputs *controller, actor_model_t *model) {
+	insert_component<CHacks>(sys.hacks, { id, wrap_to_screen, controller, model });
+	cmask = cmask | HasHacks;
+	return *this;
+}
+
 void ECS::update(unsigned int interval) {
 	auto isprite = sprites.begin();
 	auto ishape = pal_shapes.begin();
 	auto itimer = timers.begin();
 	auto imover = movers.begin();
+	auto igmc = gmcs.begin();
+	auto ihack = hacks.begin();
 
 	for (auto& e : entities) {
 		// Find this entity's components (if this entity doesn't HAVE a particular kind of component, that's OK)
 		while ((isprite != sprites.end()) && (isprite->eid < e.id)) ++isprite;
 		while ((ishape != pal_shapes.end()) && (ishape->eid < e.id)) ++ishape;
-		while ((itimer != timers.end()) & (itimer->eid < e.id)) ++itimer;
-		while ((imover != movers.end()) & (imover->eid < e.id)) ++imover;
+		while ((itimer != timers.end()) && (itimer->eid < e.id)) ++itimer;
+		while ((imover != movers.end()) && (imover->eid < e.id)) ++imover;
+		while ((igmc != gmcs.end()) && (igmc->eid < e.id)) ++igmc;
+		while ((ihack != hacks.end()) && (ihack->eid < e.id)) ++ihack;
 
 		if (e.has_any(HasTimer)) {
 			// DEBUG ASSERT
@@ -402,16 +464,93 @@ void ECS::update(unsigned int interval) {
 			isprite->bitmap = sprites_bin.sprite(ishape->shape, pal);
 		}
 
-		if (e.has_all(HasSprite | HasTimer | HasMotion)) {
+		// GRID BASED MOTION CONTROL
+		if (e.has_all(HasSprite | HasMotion | HasGridMoCtrl)) {
+			assert((isprite != sprites.end()) && (imover != movers.end()) && (igmc != gmcs.end()));
+			assert((isprite->eid == e.id) && (imover->eid == e.id) && (igmc->eid == e.id));
+
+			// Check for an actor system (currently shoe-horned into CHacks
+			if (e.has_any(HasHacks)) {
+				assert((ihack != hacks.end()) && (ihack->eid == e.id));
+			
+				if (ihack->actor) {
+					imover->frames = (*ihack->actor)[(ACTOR_DIRECTION)igmc->dir][(igmc->busy) ? ACTION_MOVE : ACTION_IDLE];
+				}
+			}
+
+			if (igmc->busy) {
+				// Should we "stop" moving (i.e., switch to a rest state where we can accept a new direction
+				if ((int(isprite->x) & 0xf) == 0) { imover->dx = 0; }
+				if ((int(isprite->y) & 0xf) == 0) { imover->dy = 0; }
+				if ((imover->dx == 0) && (imover->dy == 0)) {
+					igmc->busy = false;
+				}
+			}
+
+			if (!igmc->busy && igmc->restless) {
+				// Should we "start" moving?
+				std::tie(imover->dx, imover->dy) = direction_delta(igmc->dir, 1.f);
+				igmc->busy = true;
+
+				// If this item had a timer, reset its tick for crisper looking animation
+				if (e.has_any(HasTimer)) {
+					assert((itimer != timers.end()) && (itimer->eid == e.id));
+					itimer->ticks = 0u;
+				}
+			}
+		}
+
+		if (e.has_all(HasSprite | HasMotion)) {
 			// DEBUG ASSERT
-			assert((isprite != sprites.end()) && (itimer != timers.end()) && (imover != movers.end()));
-			assert((isprite->eid == e.id) && (itimer->eid == e.id) && (imover->eid == e.id));
+			assert((isprite != sprites.end()) && (imover != movers.end()));
+			assert((isprite->eid == e.id) && (imover->eid == e.id));
 
 			// MOVING SPRITE UPDATE SYSTEM
-			isprite->x += imover->dx;
-			isprite->y += imover->dy;
-			if (imover->frames) {
+			isprite->x += imover->dx * interval;
+			isprite->y += imover->dy * interval;
+			if (imover->frames && e.has_any(HasTimer)) {
+				assert((itimer != timers.end()) && (itimer->eid == e.id));
+
 				isprite->bitmap = sprites_bin.sprite(compute_frame(imover->frames, itimer->ticks / imover->rate), pal);
+			}
+		}
+
+		// GENERAL PURPOSE HACKS
+		if (e.has_all(HasSprite | HasHacks)) {
+			assert((isprite != sprites.end()) && (ihack != hacks.end()));
+			assert((isprite->eid == e.id) && (ihack->eid == e.id));
+
+			// Wrap to screen?
+			if (ihack->wrap_to_screen) {
+				if (isprite->x < 0.f) {
+					isprite->x += VGA13_WIDTH;
+				} else if (isprite->x > VGA13_WIDTH) {
+					isprite->x -= VGA13_WIDTH;
+				}
+				if (isprite->y < 0.f) {
+					isprite->y += VGA13_HEIGHT;
+				}
+				else if (isprite->y > VGA13_HEIGHT) {
+					isprite->y -= VGA13_HEIGHT;
+				}
+			}
+
+			// Drive grid mo control with a given [abstract] game controller
+			if (ihack->controller && e.has_any(HasGridMoCtrl)) {
+				assert((igmc != gmcs.end()) && (igmc->eid == e.id));
+
+				igmc->restless = true;
+				if (ihack->controller->left()) {
+					igmc->dir = GridDirection::Left;
+				} else if(ihack->controller->right()) {
+					igmc->dir = GridDirection::Right;
+				} else if (ihack->controller->up()) {
+					igmc->dir = GridDirection::Up;
+				} else if (ihack->controller->down()) {
+					igmc->dir = GridDirection::Down;
+				} else {
+					igmc->restless = false;
+				}
 			}
 		}
 	}
@@ -419,14 +558,16 @@ void ECS::update(unsigned int interval) {
 
 void ECS::render() {
 	for (auto& s : sprites) {
-		al_draw_bitmap(s.bitmap, s.x, s.y, 0);
+		if (s.bitmap) {
+			al_draw_bitmap(s.bitmap, s.x, s.y, 0);
+		}
 
 		// DEBUG HACKS
 		if (s.flags) {
 			unsigned char r = (s.flags & 4) ? 255 : 0;
 			unsigned char g = (s.flags & 2) ? 255 : 0;
 			unsigned char b = (s.flags & 1) ? 255 : 0;
-			al_draw_rectangle(s.x, s.y, s.x + 16.0f, s.y + 16.0f, al_map_rgb(r, g, b), 1.0f);
+			al_draw_rectangle(s.x + 0.5f, s.y + 0.5f, s.x + 15.5f, s.y + 15.5f, al_map_rgb(r, g, b), 1.0f);
 		}
 	}
 }
@@ -457,6 +598,8 @@ int main(int argc, char **argv) {
 	BitmapPtr bgrd{ bload_image("TITLE.BIN", rsrc.menu_palette()) };
 	if (!bgrd) { allegro_die("Unable to BLOAD TITLE.BIN"); }
 
+	KeyboardInputs ctrl{ ALLEGRO_KEY_DOWN, ALLEGRO_KEY_LEFT, ALLEGRO_KEY_UP, ALLEGRO_KEY_RIGHT, ALLEGRO_KEY_SPACE };
+
 	/*Animation figure{ ANIMATION_TABLE[ANIM_BUBBLE_NA_SHOOT], 10 };
 	Actor cuby{ MODEL_TABLE[ACTOR_CUBY], 6 };
 	Position spot{ VGA13_WIDTH / 2, VGA13_HEIGHT / 2, 1 };*/
@@ -464,15 +607,16 @@ int main(int argc, char **argv) {
 	ECS ecs{ sprites };
 
 	// Add one palette-indepedent sprite
-	ecs.make_entity().add_sprite(VGA13_WIDTH / 2.0f, VGA13_HEIGHT / 2.0f, sprites.sprite(1), 7);
+	ecs.make_entity().add_sprite(16.0f * 10, 16.0f * 6, sprites.sprite(207), 7).add_motion().add_grid_mo_ctrl().add_hack(true, &ctrl);
 	
 	// One palette-dependent
-	ecs.make_entity().add_sprite(VGA13_WIDTH / 4.0f, VGA13_HEIGHT / 4.0f, nullptr, 5).add_pal_shape(100);
+	ecs.make_entity().add_sprite(16.0f * 5, 16.0f * 3, nullptr, 5).add_pal_shape(94);
 
-	// One looping animation
-	ecs.make_entity().add_sprite(0.0f, 0.0f, nullptr, 4).add_timer().add_motion(ANIMATION_TABLE[ANIM_BUBBLE_NA_SHOOT], 10);
+	// One looping animation (moving right)
+	ecs.make_entity().add_sprite(0.0f, 0.0f, nullptr, 4).add_timer().add_motion(ANIMATION_TABLE[ANIM_BUBBLE_NA_SHOOT], 10, 1.0f, 0.f).add_hack(true);
 
-	KeyboardInputs ctrl{ ALLEGRO_KEY_DOWN, ALLEGRO_KEY_LEFT, ALLEGRO_KEY_UP, ALLEGRO_KEY_RIGHT, ALLEGRO_KEY_SPACE };
+	// Try to make Cuby!
+	auto cuby_id = ecs.make_entity().add_sprite().add_motion(nullptr, 4u).add_grid_mo_ctrl().add_timer().add_hack(true, &ctrl, &MODEL_TABLE[ACTOR_CUBY]).id;
 
 	RenderBuffer frame_buff;	// All rendering goes here...
 	al_start_timer(timer.get());
@@ -593,13 +737,13 @@ int main(int argc, char **argv) {
 
 			ecs.render();
 
-			/*for (float y = 0.5f; y < VGA13_HEIGHT; y += 16.0f) {
-				al_draw_line(0.5f, y, VGA13_WIDTH - 0.5f, y, al_map_rgb(0, 0, 255), 1.0f);
+			for (float y = 0.5f; y < VGA13_HEIGHT; y += 16.0f) {
+				al_draw_line(0.5f, y, VGA13_WIDTH - 0.5f, y, al_map_rgba_f(0.5f, 0.5f, 0.5f, 0.25f), 1.0f);
 			}
 
 			for (float x = 0.5f; x < VGA13_WIDTH; x += 16.0f) {
-				al_draw_line(x, 0.5f, x, VGA13_HEIGHT - 0.5f, al_map_rgb(0, 0, 255), 1.0f);
-			}*/
+				al_draw_line(x, 0.5f, x, VGA13_HEIGHT - 0.5f, al_map_rgba_f(0.5f, 0.5f, 0.5f, 0.25f), 1.0f);
+			}
 
 			frame_buff.flip(dptr.get());
 			render = false;
