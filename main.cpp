@@ -12,6 +12,7 @@
 #include <memory>
 #include <stdexcept>
 #include <algorithm>
+#include <functional>
 
 // Raw Allegro 5 stuff
 #include <allegro5/allegro.h>
@@ -120,23 +121,16 @@ struct Position
 
 class Animation {
 	const int * seq_;
-	unsigned frame_, rate_, ttl_;
+	unsigned tick_, rate_;
 public:
-	Animation(const int *seq, unsigned rate) : seq_(seq), frame_(0), rate_(rate), ttl_(rate_) {}
+	Animation(const int *seq, unsigned rate = 0) : seq_{ seq }, tick_{ 0 }, rate_{ rate } {}
 
 	int shape() const {
-		return seq_[frame_];
+		return compute_frame(seq_, rate_ ? (tick_ / rate_) : tick_);
 	}
 
 	void advance() {
-		// Handle delay between frames (if rate_ != 0)
-		if (rate_ && (--ttl_ > 0)) return;
-
-		ttl_ = rate_;
-		int next_shape = seq_[++frame_];
-		if (next_shape < 0) {
-			frame_ += next_shape;
-		}
+		++tick_;
 	}
 
 	int shape_advance() {
@@ -144,7 +138,6 @@ public:
 		advance();
 		return ret;
 	}
-
 };
 
 class Actor {
@@ -236,55 +229,207 @@ private:
 // Entity/Component/System experiments
 //------------------------------------------
 
-// Component: Position on screen (pixel coordinates)
-struct CPos {
-	int x, y;
+using entity_id_t = unsigned int;
+
+// Component: A basic sprite (position on screen, ALLEGRO_BITMAP* to render)
+struct CSprite {
+	entity_id_t eid;
+	float x, y;
+	ALLEGRO_BITMAP *bitmap;
+	int flags;		// Arbitrary flags used by rendering system to alter sprite's appearance
 };
 
-// Component: Movement on screen (pixel deltas)
+// Component: Time/lifecycle
+struct CTimer {
+	entity_id_t eid;
+	unsigned int ticks;		// Monotonically increasing "clock" (useful for animation, etc.)
+	unsigned int ttl;		// Decreasing (if > 0) "time-to-live" timer; useful for state changes
+};
+
+// Component: Movement (change in CSprite::x/y and [optionally] CSprite::bitmap based on CTime::ticks)
 struct CMotion {
-	int dx, dy;
+	entity_id_t eid;
+	float dx, dy;			// Used to modify CSprite::x and CSprite::y
+	sequence_t frames;		// Optional; if not nullptr, used to compute help new CSprite::bitmap
+	unsigned int rate;		// Tick divider used to slow down frame transitions
 };
 
-// Component: Raw bitmap to draw on screen
-struct CRawBitmap {
-	const ALLEGRO_BITMAP *bitmap;
-};
-
-// Component: Palette-aware SPRITES.BIN shape
-struct CStdShape {
+// Component: Palette-sensitive bitmap hack
+struct CPalShape {
+	entity_id_t eid;
 	size_t shape;
 };
 
-// Component: an animation sequence
-struct CSequence {
-	const int * const seq;
-	int tick;
-};
 
-// Component: Actor/model with orientation
-struct CActor {
-	const actor_model_t *model;
-	ACTOR_DIRECTION dir;
-	ACTOR_ACTION actor_
-};
+// Compare any 2 components (of the same type) to sort on EID
+template<typename ComponentType>
+bool compare_components(const ComponentType& lhs, const ComponentType& rhs) {
+	return lhs.eid < rhs.eid;
+}
 
+// Insert a component (by move-assignment) into a vector of that type of component,
+// keeping the vector sorted by entity ID (for fast binary search later)
+template<typename ComponentType, typename ContainerType = std::vector<ComponentType>>
+ComponentType& insert_component(ContainerType& container, ComponentType&& component) {
+	auto target = std::upper_bound(container.begin(), container.end(), component, compare_components<ComponentType>);
+	auto place = container.insert(target, component);
+	return *place;
+}
+
+template<typename ComponentType, typename ContainerType = std::vector<ComponentType>>
+ComponentType* lookup_component(ContainerType& container, entity_id_t eid) {
+	auto place = std::lower_bound(container.begin(), container.end(), component compare_components<ComponentType>);
+	if ((place == container.end()) || (place->eid != eid)) {
+		return nullptr;
+	}
+	else {
+		return &*place;
+	}
+}
+
+// Typedef/consts for bitmask telling what components are available for a given entity
+using component_mask_t = unsigned int;
+const component_mask_t HasSprite = 1, HasPalShape = 2, HasTimer = 4, HasMotion = 8;
+
+// Fwd decl of master system struct
+struct ECS;
 
 struct Entity {
-	unsigned int id;	// Arbitrary/unique/opaque entity identifier
+	entity_id_t			id;		// Arbitrary/unique/opaque entity identifier
+	component_mask_t	cmask;	// Bitmask of what components this has
+	ECS&				sys;	// Reference back to parent system
 
-	// Bitfields indicating what components are here
-	struct {
-		bool pos : 1;
-		bool motion : 1;
-		bool bitmap : 1;
-		bool shape : 1;
-		bool actor : 1;
-	} has;
+	Entity(ECS& parent, entity_id_t eid, component_mask_t mask) : id{ eid }, cmask{ mask }, sys{ parent } {}
 
+	bool has_all(component_mask_t mask) {
+		return (cmask & mask) == mask;
+	}
+
+	bool has_any(component_mask_t mask) {
+		return (cmask & mask);
+	}
+
+	Entity& add_sprite(float x, float y, ALLEGRO_BITMAP* bitmap, int flags = 0);
+	Entity& add_pal_shape(size_t shape);
+	Entity& add_timer(unsigned int ttl = 0);
+	Entity& add_motion(sequence_t animation, unsigned int rate = 1, float dx = 0.0f, float dy = 0.0f);
 };
 
+struct ECS {
+	// "Global" resources and state used by this system
+	const SpritesBin& sprites_bin;
+	ResourceBin::PALETTE pal;
 
+	// The official game objects
+	std::vector<Entity> entities;
+
+	// This system's current max ID
+	entity_id_t eid_seed;
+
+	// The components, stored contiguously
+	std::vector<CSprite> sprites;
+	std::vector<CPalShape> pal_shapes;
+	std::vector<CTimer> timers;
+	std::vector<CMotion> movers;
+
+	ECS(const SpritesBin& sprites) : sprites_bin{ sprites }, pal{ ResourceBin::PAL_DEFAULT }, eid_seed { 0 } {}
+
+	// The entity list will always be sorted--we always add new entities at the back,
+	// and each new entity has an ID greater than all the previous ones (up until rollover--LOL)
+	Entity& make_entity() {
+		entities.emplace_back(*this, ++eid_seed, 0u);
+		return entities.back();
+	}
+
+	// Update all timers/movements/etc. (anything "tick" based)
+	void update(unsigned int interval = 1);
+
+	// Draw all stuff (no "updates" performed)
+	void render();
+};
+
+Entity& Entity::add_sprite(float x, float y, ALLEGRO_BITMAP* bitmap, int flags) {
+	insert_component<CSprite>(sys.sprites, { id, x, y, bitmap, flags });
+	cmask = cmask | HasSprite;
+	return *this;
+}
+
+Entity& Entity::add_pal_shape(size_t shape) {
+	insert_component<CPalShape>(sys.pal_shapes, { id, shape });
+	cmask = cmask | HasPalShape;
+	return *this;
+}
+
+Entity& Entity::add_timer(unsigned int ttl) {
+	insert_component<CTimer>(sys.timers, { id, 0u, ttl });
+	cmask = cmask | HasTimer;
+	return *this;
+}
+
+Entity& Entity::add_motion(sequence_t animation, unsigned int rate, float dx, float dy) {
+	insert_component<CMotion>(sys.movers, { id, dx, dy, animation, std::max(rate, 1u) });
+	cmask = cmask | HasMotion;
+	return *this;
+}
+
+void ECS::update(unsigned int interval) {
+	auto isprite = sprites.begin();
+	auto ishape = pal_shapes.begin();
+	auto itimer = timers.begin();
+	auto imover = movers.begin();
+
+	for (auto& e : entities) {
+		// Find this entity's components (if this entity doesn't HAVE a particular kind of component, that's OK)
+		while ((isprite != sprites.end()) && (isprite->eid < e.id)) ++isprite;
+		while ((ishape != pal_shapes.end()) && (ishape->eid < e.id)) ++ishape;
+		while ((itimer != timers.end()) & (itimer->eid < e.id)) ++itimer;
+		while ((imover != movers.end()) & (imover->eid < e.id)) ++imover;
+
+		if (e.has_any(HasTimer)) {
+			// DEBUG ASSERT
+			assert((itimer != timers.end()) && (itimer->eid == e.id));
+
+			// TIMER UPDATE SYSTEM
+			itimer->ticks += interval;
+			itimer->ttl = (interval >= itimer->ttl) ? 0 : itimer->ttl - interval;
+		}
+
+		if (e.has_all(HasSprite | HasPalShape)) {
+			// DEBUG ASSERT
+			assert((isprite != sprites.end()) && (ishape != pal_shapes.end()) && (isprite->eid == e.id) && (ishape->eid == e.id));
+
+			// PAL SHAPE UPDATE SYSTEM
+			isprite->bitmap = sprites_bin.sprite(ishape->shape, pal);
+		}
+
+		if (e.has_all(HasSprite | HasTimer | HasMotion)) {
+			// DEBUG ASSERT
+			assert((isprite != sprites.end()) && (itimer != timers.end()) && (imover != movers.end()));
+			assert((isprite->eid == e.id) && (itimer->eid == e.id) && (imover->eid == e.id));
+
+			// MOVING SPRITE UPDATE SYSTEM
+			isprite->x += imover->dx;
+			isprite->y += imover->dy;
+			if (imover->frames) {
+				isprite->bitmap = sprites_bin.sprite(compute_frame(imover->frames, itimer->ticks / imover->rate), pal);
+			}
+		}
+	}
+}
+
+void ECS::render() {
+	for (auto& s : sprites) {
+		al_draw_bitmap(s.bitmap, s.x, s.y, 0);
+
+		// DEBUG HACKS
+		if (s.flags) {
+			unsigned char r = (s.flags & 4) ? 255 : 0;
+			unsigned char g = (s.flags & 2) ? 255 : 0;
+			unsigned char b = (s.flags & 1) ? 255 : 0;
+			al_draw_rectangle(s.x, s.y, s.x + 16.0f, s.y + 16.0f, al_map_rgb(r, g, b), 1.0f);
+		}
+	}
+}
 
 int main(int argc, char **argv) {
 	startup();
@@ -312,16 +457,28 @@ int main(int argc, char **argv) {
 	BitmapPtr bgrd{ bload_image("TITLE.BIN", rsrc.menu_palette()) };
 	if (!bgrd) { allegro_die("Unable to BLOAD TITLE.BIN"); }
 
-	Animation figure{ ANIMATION_TABLE[ANIM_BUBBLE_NA_SHOOT], 10 };
+	/*Animation figure{ ANIMATION_TABLE[ANIM_BUBBLE_NA_SHOOT], 10 };
 	Actor cuby{ MODEL_TABLE[ACTOR_CUBY], 6 };
-	Position spot{ VGA13_WIDTH / 2, VGA13_HEIGHT / 2, 1 };
+	Position spot{ VGA13_WIDTH / 2, VGA13_HEIGHT / 2, 1 };*/
+
+	ECS ecs{ sprites };
+
+	// Add one palette-indepedent sprite
+	ecs.make_entity().add_sprite(VGA13_WIDTH / 2.0f, VGA13_HEIGHT / 2.0f, sprites.sprite(1), 7);
+	
+	// One palette-dependent
+	ecs.make_entity().add_sprite(VGA13_WIDTH / 4.0f, VGA13_HEIGHT / 4.0f, nullptr, 5).add_pal_shape(100);
+
+	// One looping animation
+	ecs.make_entity().add_sprite(0.0f, 0.0f, nullptr, 4).add_timer().add_motion(ANIMATION_TABLE[ANIM_BUBBLE_NA_SHOOT], 10);
+
 	KeyboardInputs ctrl{ ALLEGRO_KEY_DOWN, ALLEGRO_KEY_LEFT, ALLEGRO_KEY_UP, ALLEGRO_KEY_RIGHT, ALLEGRO_KEY_SPACE };
 
 	RenderBuffer frame_buff;	// All rendering goes here...
 	al_start_timer(timer.get());
 	bool done = false;
 	bool render = true;
-	ResourceBin::PALETTE pal = ResourceBin::PAL_DEFAULT;
+	//ResourceBin::PALETTE pal = ResourceBin::PAL_DEFAULT;
 	while (!done) {
 		ALLEGRO_EVENT evt;
 		al_wait_for_event(events.get(), &evt);
@@ -338,7 +495,7 @@ int main(int argc, char **argv) {
 			case ALLEGRO_KEY_ESCAPE:
 				done = true;
 				break;
-			case ALLEGRO_KEY_F1:
+			/*case ALLEGRO_KEY_F1:
 				cuby.set_model(MODEL_TABLE[ACTOR_CUBY], 6);
 				break;
 			case ALLEGRO_KEY_F2:
@@ -368,25 +525,25 @@ int main(int argc, char **argv) {
 			case ALLEGRO_KEY_PGUP:
 				break;
 			case ALLEGRO_KEY_PGDN:
-				break;
+				break;*/
 			}
 			break;
 		case ALLEGRO_EVENT_KEY_CHAR:
 			switch (evt.keyboard.unichar) {
 			case '0':
-				pal = ResourceBin::PAL_DEFAULT;
+				ecs.pal = ResourceBin::PAL_DEFAULT;
 				render = true;
 				break;
 			case '1':
-				pal = ResourceBin::PAL_RED_ENEMIES;
+				ecs.pal = ResourceBin::PAL_RED_ENEMIES;
 				render = true;
 				break;
 			case '2':
-				pal = ResourceBin::PAL_BLUE_ENEMIES;
+				ecs.pal = ResourceBin::PAL_BLUE_ENEMIES;
 				render = true;
 				break;
 			case '3':
-				pal = ResourceBin::PAL_DIM_ENEMIES;
+				ecs.pal = ResourceBin::PAL_DIM_ENEMIES;
 				render = true;
 				break;
 			case 'a':	// 0
@@ -422,24 +579,27 @@ int main(int argc, char **argv) {
 
 		if (render && al_is_event_queue_empty(events.get())) {
 			// "Control"
-			cuby.set_from_inputs(ctrl);
-			spot.set_delta_from_inputs(ctrl);
+			//cuby.set_from_inputs(ctrl);
+			//spot.set_delta_from_inputs(ctrl);
 
 			// "Physics"
-			spot.update();
+			//spot.update();
+			ecs.update();
 
 			// "Render"
 			al_draw_bitmap(bgrd.get(), 0, 0, 0);
-			al_draw_bitmap(sprites.sprite(cuby.shape_advance(), pal), spot.x, spot.y, 0);
-			al_draw_bitmap(sprites.sprite(figure.shape_advance(), pal), 0, 0, 0);
+			//al_draw_bitmap(sprites.sprite(cuby.shape_advance(), pal), spot.x, spot.y, 0);
+			//al_draw_bitmap(sprites.sprite(figure.shape_advance(), pal), 0, 0, 0);
 
-			for (float y = 0.5f; y < VGA13_HEIGHT; y += 16.0f) {
+			ecs.render();
+
+			/*for (float y = 0.5f; y < VGA13_HEIGHT; y += 16.0f) {
 				al_draw_line(0.5f, y, VGA13_WIDTH - 0.5f, y, al_map_rgb(0, 0, 255), 1.0f);
 			}
 
 			for (float x = 0.5f; x < VGA13_WIDTH; x += 16.0f) {
 				al_draw_line(x, 0.5f, x, VGA13_HEIGHT - 0.5f, al_map_rgb(0, 0, 255), 1.0f);
-			}
+			}*/
 
 			frame_buff.flip(dptr.get());
 			render = false;

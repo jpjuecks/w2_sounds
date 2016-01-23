@@ -43,12 +43,12 @@ enum ANIMATION {
 #undef LOOP
 
 // Type alias for an actor model mapping table node
-using sequence_t = const int * const;
-using actor_model_t = sequence_t[DIR_MAX][ACTION_MAX];
+using sequence_t = const int *;
+using actor_model_t = const sequence_t[DIR_MAX][ACTION_MAX];
 
 // Declarations of global animation metadata tables
 //-------------------------------------------------
-extern sequence_t ANIMATION_TABLE[];			// Array of pointers to frame-sequences (terminated by a value < 0)
+extern const sequence_t ANIMATION_TABLE[];		// Array of pointers to frame-sequences (terminated by a value < 0)
 extern const size_t NUM_ANIMATIONS;				// Size of ANIMATION_TABLE in elements
 extern const char * const ANIMATION_NAMES[];	// Parallel array of C-strings naming each animation sequence
 extern actor_model_t MODEL_TABLE[ACTOR_MAX];	// Array of actor_model_t

@@ -77,12 +77,12 @@ public:
 	SpritesBin(const ResourceBin& rsrc, const char *pathToSpritesBin = "SPRITES.BIN");
 
 	// Get entire grid (for special effects)
-	ALLEGRO_BITMAP *sprite_map(ResourceBin::PALETTE palette = ResourceBin::PAL_DEFAULT) {
+	ALLEGRO_BITMAP *sprite_map(ResourceBin::PALETTE palette = ResourceBin::PAL_DEFAULT) const {
 		return sprite_maps_.at(palette).get();
 	}
 
 	// Get sub-bitmap of individual sprite
-	ALLEGRO_BITMAP *sprite(size_t shape, ResourceBin::PALETTE palette = ResourceBin::PAL_DEFAULT) {
+	ALLEGRO_BITMAP *sprite(size_t shape, ResourceBin::PALETTE palette = ResourceBin::PAL_DEFAULT) const {
 		return sprites_.at(palette).at(shape).get();
 	}
 };
