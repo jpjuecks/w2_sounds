@@ -130,12 +130,13 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <None Include="packages.config" />
-    <ClCompile Include="tables.cpp">
+    <ClCompile Include="actors.cpp">
       <FileType>Document</FileType>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="assets.cpp" />
+    <ClCompile Include="inputs.cpp" />
     <ClCompile Include="main.cpp">
       <PreprocessToFile Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">false</PreprocessToFile>
       <PreprocessToFile Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">false</PreprocessToFile>
@@ -145,6 +146,9 @@
     <ClInclude Include="assets.h" />
     <ClInclude Include="awful.h" />
     <ClInclude Include="common.h" />
+    <ClInclude Include="actors.h" />
+    <ClInclude Include="horror.h" />
+    <ClInclude Include="inputs.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

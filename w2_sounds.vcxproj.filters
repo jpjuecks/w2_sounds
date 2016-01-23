@@ -24,7 +24,10 @@
     <ClCompile Include="assets.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="tables.cpp">
+    <ClCompile Include="actors.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="inputs.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -36,6 +39,15 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="common.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="actors.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="inputs.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="horror.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>
