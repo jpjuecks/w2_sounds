@@ -53,5 +53,5 @@ extern const size_t NUM_ANIMATIONS;				// Size of ANIMATION_TABLE in elements
 extern const char * const ANIMATION_NAMES[];	// Parallel array of C-strings naming each animation sequence
 extern actor_model_t MODEL_TABLE[ACTOR_MAX];	// Array of actor_model_t
 
-// Declaration for general sequence mapping function
+// Gets the <tick>th frame number from the sequence <seq>
 int compute_frame(sequence_t seq, unsigned int tick);
