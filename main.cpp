@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <functional>
+#include <utility>
 
 // Raw Allegro 5 stuff
 #include <allegro5/allegro.h>
@@ -265,7 +266,7 @@ struct CSprite : public Component {
 		Component{ eid_ }, bitmap{ bitmap_}, x{ x_ }, y{ y_ }, flags{ flags_ } {}
 };
 
-// Component: Animation (metadata for a moving/animating sprite)
+// Component: Animation (metadata for a animating sprite)
 struct CAnimation : public Component {
 	static constexpr component_mask_t Mask = 2;
 
@@ -276,23 +277,16 @@ struct CAnimation : public Component {
 	sequence_t seq;
 	int rate;
 
-	// Sprite motion on screen
-	float dx, dy;
-
 	// Palette effect (useful for enemies only)
 	ResourceBin::PALETTE pal;
 	
-	// "Wobble" on the y axis; 
+	// "Wobble" on the y axis (to be implemented)
 	float wamp;	// max positive amplitude
 	int wper;	// period of an up/down cycle in frame ticks
 
-	CAnimation(entity_id_t eid_) :
-		Component{ eid_ }, tbase{ 0u }, seq{ nullptr }, rate{ 0 }, pal{ ResourceBin::PAL_DEFAULT }, wamp{ 0.0f }, wper{ 0 } {}
+	CAnimation(entity_id_t eid_, sequence_t seq_ = nullptr, int rate_ = 1, ResourceBin::PALETTE pal_ = ResourceBin::PAL_DEFAULT, float wamp_ = 0.0f, int wper_ = 0) :
+		Component{ eid_ }, tbase{ 0u }, seq{ seq_ }, rate{ rate_ }, pal{ pal_ }, wamp{ wamp_ }, wper{ wper_ } {}
 
-	CAnimation(entity_id_t eid_, float dx_, float dy_) : CAnimation{ eid_ } {
-		dx = dx_;
-		dy = dy_;
-	}
 };
 
 // Component: Actor (multi-direction/action animated model)
@@ -304,7 +298,7 @@ struct CActor : public Component {
 	ACTOR_ACTION action;
 
 	CActor(entity_id_t eid_, actor_model_t *model_ = nullptr, ACTOR_DIRECTION dir_ = DIR_DOWN, ACTOR_ACTION action_ = ACTION_IDLE) :
-		Component{ eid_ }, model{ model_ }, dir{ dir_ }, action{ action_ } {}
+		Component{ eid }, model { model_ }, dir{ dir_ }, action{ action_ } {}
 };
 
 enum class GridDirection {
@@ -329,19 +323,22 @@ std::pair<float, float> direction_delta(GridDirection dir, float scale = 1.0f) {
 	}
 }
 
-// Component: Entity motion control (to be driven by AI/user input)
-struct CController : public Component {
+// Component: Grid mover (dynamic entity whose movement is constrained by the 16x16 grid)
+struct CGridMover : public Component {
 	static constexpr component_mask_t Mask = 8;
 
-	bool busy;			// TRUE if the entity is "busy" and cannot be controlled at the moment
-	tick_t until;		// Game tick our busy state (if any) should last until
+	bool moving;				// TRUE if the entity is moving
+	float dx, dy;				// Actual screen motion deltas
+	ACTOR_DIRECTION cur_dir;	// Actual facing direction of current movement (useful for Actors)
 
 	// Control intent indicators
 	bool			should_move;
 	GridDirection	move_dir;
+	float			move_scale;
 
-	CController(entity_id_t eid_, bool busy_ = false, tick_t until_ = 0u, bool should_move_ = false, GridDirection move_dir_ = GridDirection::Down) :
-		Component{ eid_ }, busy{ busy_ }, until{ until_ }, should_move{ should_move_ }, move_dir{ move_dir_ } {}
+	CGridMover(entity_id_t eid_, bool moving_ = false, bool should_move_ = false, GridDirection move_dir_ = GridDirection::Down, float move_scale_ = 1.0f) :
+		Component{ eid_ }, moving{ moving_}, dx{ 0.0f }, dy{ 0.0f }, cur_dir{ (ACTOR_DIRECTION)move_dir_ },
+		should_move{ should_move_ }, move_dir{ move_dir_ }, move_scale{ move_scale_ } {}
 };
 
 // Component: "Hacks" component for general experimentation
@@ -375,6 +372,25 @@ ComponentType* lookup_component(ContainerType& container, entity_id_t eid) {
 	else {
 		return &*place;
 	}
+}
+
+// Compile-time-recursive foreach-tuple implementation inspired by (http://stackoverflow.com/questions/1198260/iterate-over-tuple/6894436#6894436)
+template<size_t Index, typename Func, typename... Pack>
+inline typename std::enable_if<Index == sizeof...(Pack)>::type tuple_foreach(std::tuple<Pack...> tup, Func fun) {} // Terminal case (no-op)
+
+template<size_t Index, typename Func, typename... Pack>
+inline typename std::enable_if<Index < sizeof...(Pack)>::type tuple_foreach(std::tuple<Pack...> tup, Func fun) {
+	fun(std::get<Index>(tup));							// Invoke payload...
+	tuple_foreach<Index + 1, Func, Pack...>(tup, fun);	// ...and recurse
+}
+
+
+// Advance an iterator-to-Component-collection until it hits the end or an entity ID >= the target
+// (Returns TRUE if it hit the target, FALSE otherwise)
+template<typename ComponentType, typename IteratorType = std::vector<ComponentType>::iterator>
+bool sync_iterator(entity_id_t eid, IteratorType& iter, const IteratorType& end) {
+	while ((iter != end) && (iter->eid < eid)) { ++iter; }
+	return (iter == end) ? false : (iter->eid == eid);
 }
 
 // An entity/component framework that supports a given list of component types (all subtypes of Component)
@@ -423,6 +439,141 @@ struct ECS {
 	Entity& make_entity() {
 		entities.emplace_back(*this, ++eid_seed);
 		return entities.back();
+	}
+
+	template<typename ComponentType>
+	std::vector<ComponentType>& get_components() {
+		return std::get<std::vector<ComponentType>>(components);
+	}
+
+	// TODO: use some magic template-fu to make a generic
+	// "iterate over all entities with X components and call
+	// this callable passing in references to those components"
+
+
+	// Drive user-control of grid movers
+	void sys_user_controls() {
+		std::vector<CGridMover>&	movers = get_components<CGridMover>();
+		std::vector<CHacks>&		hacks = get_components<CHacks>();
+
+		auto imover = movers.begin();
+		auto ihack = hacks.begin();
+
+		// For each entity...
+		for (Entity& e : entities) {
+			if (e.has_all(CGridMover::Mask | CHacks::Mask) && sync_iterator<CGridMover>(e.id, imover, movers.end()) && sync_iterator<CHacks>(e.id, ihack, hacks.end())) {
+				CGridMover& mover = *imover;
+				CHacks& hack = *ihack;
+
+				if (hack.controller) {
+					if (hack.controller->left()) {
+						mover.move_dir = GridDirection::Left;
+						mover.should_move = true;
+					}
+					else if (hack.controller->right()) {
+						mover.move_dir = GridDirection::Right;
+						mover.should_move = true;
+					}
+					else if (hack.controller->up()) {
+						mover.move_dir = GridDirection::Up;
+						mover.should_move = true;
+					}
+					else if (hack.controller->down()) {
+						mover.move_dir = GridDirection::Down;
+						mover.should_move = true;
+					}
+					else {
+						mover.should_move = false;
+					}
+				}
+			}
+		}
+	}
+
+	// Drive grid-locked motion
+	void sys_grid_moves() {
+		std::vector<CSprite>&		sprites = get_components<CSprite>();
+		std::vector<CGridMover>&	movers = get_components<CGridMover>();
+
+		auto isprite = sprites.begin();
+		auto imover = movers.begin();
+
+		// For each entity...
+		for (Entity& e : entities) {
+			if (e.has_all(CSprite::Mask | CGridMover::Mask) && sync_iterator<CSprite>(e.id, isprite, sprites.end()) && sync_iterator<CGridMover>(e.id, imover, movers.end())) {
+				CSprite& sprite = *isprite;
+				CGridMover& mover = *imover;
+
+				if (mover.moving) {
+					// Move!
+					sprite.x += mover.dx;
+					sprite.y += mover.dy;
+
+					// Have we entered a rest position?
+					if ((int(sprite.x) % 16 == 0) && (int(sprite.y) % 16 == 0)) {
+						// End busy mode (and stop moving)...
+						mover.moving = false;
+						mover.dx = mover.dy = 0.0f;
+					}
+				}
+				else {
+					// We are open to changing state
+					if (mover.should_move) {
+						mover.cur_dir = (ACTOR_DIRECTION)mover.move_dir;
+						std::tie(mover.dx, mover.dy) = direction_delta(mover.move_dir, mover.move_scale);
+						mover.moving = true;
+					}
+				}
+			}
+		}
+	}
+
+	// Sync grid motion with actor orientation/action
+	void sys_grid_actors() {
+
+	}
+
+	// Drive animations
+	void sys_animate(tick_t game_clock, const SpritesBin& sprite_data) {
+		auto& animats = get_components<CAnimation>();
+		auto& sprites = get_components<CSprite>();
+
+		auto ianimat = animats.begin();
+		auto isprite = sprites.begin();
+		
+		// For each entity...
+		for (Entity& e : entities) {
+			if (e.has_all(CAnimation::Mask | CSprite::Mask) && sync_iterator<CSprite>(e.id, isprite, sprites.end()) && sync_iterator<CAnimation>(e.id, ianimat, animats.end())) {
+				CSprite& sprite = *isprite;
+				CAnimation& animat = *ianimat;
+
+				// Update the SPRITE's bitmap based on the computed frame (and known palette) of ANIMATION
+				auto clock = (game_clock - animat.tbase) / animat.rate;
+				sprite.bitmap = sprite_data.sprite(compute_frame(animat.seq, clock), animat.pal);
+			}
+		}
+	}
+
+	// Walk all CSprite components and render them
+	void sys_render() {
+		for (CSprite& s : get_components<CSprite>()) {
+			if (s.bitmap) {
+				al_draw_bitmap(s.bitmap, s.x, s.y, 0);
+
+				// DEBUG HACKS
+				if (s.flags) {
+					unsigned char r = (s.flags & 4) ? 255 : 0;
+					unsigned char g = (s.flags & 2) ? 255 : 0;
+					unsigned char b = (s.flags & 1) ? 255 : 0;
+					al_draw_rectangle(
+						s.x + 0.5f,
+						s.y + 0.5f,
+						s.x + al_get_bitmap_width(s.bitmap),
+						s.y + al_get_bitmap_height(s.bitmap),
+						al_map_rgb(r, g, b), 1.0f);
+				}
+			}
+		}
 	}
 };
 
@@ -578,7 +729,7 @@ int main(int argc, char **argv) {
 	al_register_event_source(events.get(), al_get_keyboard_event_source());
 	al_register_event_source(events.get(), al_get_mouse_event_source());
 
-	TimerPtr timer{ al_create_timer(1.0 / 60) };
+	TimerPtr timer{ al_create_timer(1.0 / 64) };
 	if (!timer) { allegro_die("Unable to create timer"); }
 	al_register_event_source(events.get(), al_get_timer_event_source(timer.get()));
 	
@@ -603,10 +754,13 @@ int main(int argc, char **argv) {
 	Position spot{ VGA13_WIDTH / 2, VGA13_HEIGHT / 2, 1 };*/
 
 	// Create an E/C manager for our given component types
-	ECS<CSprite, CAnimation, CActor, CController, CHacks> ecs;
+	ECS<CSprite, CAnimation, CActor, CGridMover, CHacks> ecs;
 
-	// Add one palette-indepedent sprite
-	ecs.make_entity().add<CSprite>(sprites.sprite(207), 16.f * 10, 16.f * 6).add<CAnimation>(1.0f, 0.0f).add<CHacks>(true);
+	ecs.make_entity().add<CSprite>(bgrd.get());
+	ecs.make_entity().add<CSprite>(nullptr, 16.f * 3, 16.f * 10, 2).add<CAnimation>(ANIMATION_TABLE[ANIM_WORM_RIGHT_MOVE], 8);
+	ecs.make_entity().add<CSprite>(sprites.sprite(207), 16.f * 10, 16.f * 6, 4).add<CGridMover>().add<CHacks>(true, &ctrl);
+
+
 	//ecs.make_entity().add_sprite(16.0f * 10, 16.0f * 6, sprites.sprite(207), 7).add_motion().add_grid_mo_ctrl().add_hack(true, &ctrl);
 	
 	// One palette-dependent
@@ -622,6 +776,8 @@ int main(int argc, char **argv) {
 	al_start_timer(timer.get());
 	bool done = false;
 	bool render = true;
+	tick_t game_clock = 0u;
+
 	//ResourceBin::PALETTE pal = ResourceBin::PAL_DEFAULT;
 	while (!done) {
 		ALLEGRO_EVENT evt;
@@ -716,6 +872,7 @@ int main(int argc, char **argv) {
 			break;
 		case ALLEGRO_EVENT_TIMER:
 			if (evt.timer.source == timer.get()) {
+				++game_clock;
 				render = true;
 			}
 			break;
@@ -731,11 +888,17 @@ int main(int argc, char **argv) {
 			//ecs.update();
 
 			// "Render"
-			al_draw_bitmap(bgrd.get(), 0, 0, 0);
+			
 			//al_draw_bitmap(sprites.sprite(cuby.shape_advance(), pal), spot.x, spot.y, 0);
 			//al_draw_bitmap(sprites.sprite(figure.shape_advance(), pal), 0, 0, 0);
 
 			//ecs.render();
+
+			ecs.sys_user_controls();
+			ecs.sys_grid_moves();
+			ecs.sys_animate(game_clock, sprites);
+			ecs.sys_render();
+			
 
 			for (float y = 0.5f; y < VGA13_HEIGHT; y += 16.0f) {
 				al_draw_line(0.5f, y, VGA13_WIDTH - 0.5f, y, al_map_rgba_f(0.5f, 0.5f, 0.5f, 0.25f), 1.0f);
